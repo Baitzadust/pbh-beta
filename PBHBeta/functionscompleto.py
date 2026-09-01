@@ -19,32 +19,40 @@ _M_pl_g    = 2.17645e-5
 _H_end_GeV = 4.44e13       
 _H_end_pl  = _H_end_GeV / _M_pl_GeV   
 
-def put_M_array(Mass_min, Mass_max, num_points=1000):
- #Modificación que pasa a escala log
+def put_M_array(Mass_min, Mass_max, num_points_low=5000, num_points_high=5000):
+   
+    Mass_cut = 1.0e5
+
+    # 1. Definir los límites en espacio logarítmico
     log_M_min = np.log10(Mass_min)
+    log_M_cut = np.log10(Mass_cut)
     log_M_max = np.log10(Mass_max)
-    
 
-    log_grid = np.linspace(log_M_min, log_M_max, num_points)
-    
+    # 2. Generar las dos mallas con resoluciones independientes
+    log_grid_low = np.linspace(log_M_min, log_M_cut, num_points_low)
+    log_grid_high = np.linspace(log_M_cut, log_M_max, num_points_high)
 
+    # 3. Concatenar ambas mallas
+    log_grid = np.concatenate([log_grid_low, log_grid_high])
+
+    # 4. Incluir las masas de las restricciones (BBN, etc.) si existen
     if hasattr(constraints, 'data_mass') and len(constraints.data_mass) > 0:
         log_data = np.log10(constraints.data_mass)
-
         combined_log = np.concatenate([log_grid, log_data])
     else:
         combined_log = log_grid
 
-
+    # 5. Limpiar y ordenar el arreglo final
     combined_log = np.sort(combined_log)
     combined_log = combined_log[(combined_log >= log_M_min) & (combined_log <= log_M_max)]
-
+    
+    # np.unique elimina duplicados exactos generados en la concatenación (ej. el punto de corte)
     log_M_final = np.unique(combined_log)
 
+    # 6. Transformar de nuevo a escala lineal (gramos)
     constraints.M_tot = 10.0**log_M_final
-    
-    return constraints.M_tot
 
+    return constraints.M_tot
 
 # ---------------------------------------------------------------------------
 # FASE 1: Acreción y Evaporación de Kerr durante Recalentamiento
@@ -66,9 +74,8 @@ def precalcular_acreccion_lote(Mi_val_g, N_fin, a_star):
     phi_ini_pl = jnp.sqrt(2.0 * rho_end_inf_pl / (mu_pl**2.0 + 9.0 * H_end_pl**2.0 / 4.0))
 
     M_end_pl = 1.0 / H_end_pl
-    #N_ini = (2.0 / 3.0) * jnp.log(jnp.maximum(M_i_pl / M_end_pl, 1.0))
-    N_ini = 0.0 #Probamos con todos los PBHs naciendo al mismo tiempo
-    a_star_safe = jnp.clip(a_star, 0.0, 0.999)
+    N_ini = (2.0 / 3.0) * jnp.log(jnp.maximum(M_i_pl / M_end_pl, 1.0)) #E-fold de formación del PBH
+    a_star_safe = jnp.clip(a_star, 0.0, 0.9999)
 
     # Factores de Kerr para la evaporación
     raiz_espin = jnp.sqrt(jnp.maximum(1.0 - a_star_safe**2.0, 1e-12))
@@ -104,7 +111,7 @@ def precalcular_acreccion_lote(Mi_val_g, N_fin, a_star):
         a = a_star_safe * M_reg 
         r_plus = M_reg + jnp.sqrt(jnp.maximum(M_reg**2.0 - a**2.0, 1e-12))
         
-        f_acc_base = 2e-21
+        f_acc_base = 1e-18
         supresion = M_reg * mu_pl
         f_acc = f_acc_base * supresion
         dM_dN_acrecion = f_acc * 4.0 * jnp.pi * C_4_val * r_plus**2.0 * (rho_val / H_val)
