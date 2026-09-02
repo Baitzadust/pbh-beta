@@ -14,12 +14,15 @@ import functools
 # ---------------------------------------------------------------------------
 # Constantes en unidades de Planck
 # ---------------------------------------------------------------------------
-_M_pl_GeV  = 1.22089e19    
-_M_pl_g    = 2.17645e-5    
-_H_end_GeV = 4.44e13       
-_H_end_pl  = _H_end_GeV / _M_pl_GeV   
+M_pl_GeV = 1.22089e19
+M_pl_g = 2.17645e-5
+H_end_GeV = 4.44e13       
+H_end_pl  = H_end_GeV / M_pl_GeV   
 
-def put_M_array(Mass_min, Mass_max, num_points_low=5000, num_points_high=5000):
+f_acc_base = 1e-18
+n = 100 
+
+def put_M_array(Mass_min, Mass_max, num_points_low=7000, num_points_high=5000):
    
     Mass_cut = 1.0e5
 
@@ -67,8 +70,6 @@ def precalcular_acreccion_lote(Mi_val_g, N_fin, a_star):
     
     M_i_pl = Mi_val_g / M_pl_g
     H_end_pl = H_end_GeV / M_pl_GeV
-
-    n = 100.0 
     mu_pl = n * H_end_pl 
     rho_end_inf_pl = (3.0 * H_end_pl**2.0) / (8.0 * jnp.pi)
     phi_ini_pl = jnp.sqrt(2.0 * rho_end_inf_pl / (mu_pl**2.0 + 9.0 * H_end_pl**2.0 / 4.0))
@@ -82,6 +83,10 @@ def precalcular_acreccion_lote(Mi_val_g, N_fin, a_star):
     factor_T_kerr = (2.0 * raiz_espin) / (1.0 + raiz_espin)
     factor_Area_kerr = 0.5 * (1.0 + raiz_espin)
     factor_evap_kerr = (factor_T_kerr**4.0) * factor_Area_kerr
+    
+    #Cálculo de la masa crítica
+    ins = (16*(1-a_star**2.0)**2.0)/(9*f_acc_base*(1+jnp.sqrt(1-a_star**2.0))*n*H_end_pl)
+    M_c_g = ins**(1.0/3.0) * M_pl_g
 
     def Hubble(N):
         return H_end_pl * jnp.exp(-3.0 * N / 2.0)
@@ -106,15 +111,17 @@ def precalcular_acreccion_lote(Mi_val_g, N_fin, a_star):
         rho_val = rho_inf_field_env(N) 
         H_val   = Hubble(N)
         
+
         # 2. Dinámica de Acreción
         C_4_val = C4(M_reg, rho_val)
         a = a_star_safe * M_reg 
         r_plus = M_reg + jnp.sqrt(jnp.maximum(M_reg**2.0 - a**2.0, 1e-12))
-        
-        f_acc_base = 1e-18
         supresion = M_reg * mu_pl
         f_acc = f_acc_base * supresion
         dM_dN_acrecion = f_acc * 4.0 * jnp.pi * C_4_val * r_plus**2.0 * (rho_val / H_val)
+        M_H_actual = 1.0 / H_val
+        factor_causal = jnp.clip(1.0 - (M_reg / M_H_actual), 0.0, 1.0)
+        dM_dN_acrecion = dM_dN_acrecion * factor_causal
         
         # 3. Dinámica de Evaporación
         dM_dt_evap_pl = - (1.0 / (3.0 * (M_actual**2.0 + 1.0))) * factor_evap_kerr
@@ -660,3 +667,23 @@ def get_Omegas_full(M_tot):
             constraints.Omegas_full[i] = min(values)
 
     return constraints.Omegas_full
+
+def calcular_masa_critica_transicion(a_star):
+    """
+    Calcula analíticamente la masa crítica inicial (M_c en gramos) donde la tasa
+    de acreción balancea exactamente a la evaporación de Hawking-Kerr en N_ini.
+    """
+
+    # Asegurar estabilidad si a_star se acerca a 1
+    a_star_safe = jnp.clip(a_star, 0.0, 0.9999)
+    raiz_espin = jnp.sqrt(1.0 - a_star_safe**2.0)
+
+    # Expresión analítica derivada de dM/dN = 0
+    numerador = 16.0 * (1.0 - a_star_safe**2.0)**2.0
+    denominador = 9.0 * f_acc_base * (1.0 + raiz_espin) * n * H_end_pl
+    
+    ins = numerador / denominador
+    M_c_pl = ins**(1.0 / 3.0)
+    M_c_g = float(M_c_pl * M_pl_g)
+    
+    return M_c_g
