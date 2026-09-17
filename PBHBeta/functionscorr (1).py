@@ -29,9 +29,17 @@ n = 100.00
 L_ACC_DEFAULT = 102.0   # L del paper; L > 4*pi*GAMMA_H ~ 12.6 pone al PBH en horizon-tracking
 GAMMA_H = 1.0            # gamma^MD, convención PBHBeta (ver PBHBeta/BfM.py: "no bien conocido, se adopta 1")
 
-# alpha de evaporación de Hawking-Kerr (AUDIT.md P0-1): dM/dt = -alpha/M^2 * factor_evap_kerr.
-# alpha = 1/3 (heredado de Delta_t = t_pl*(M/M_pl_g)^3 de PBHBeta) es 333x el valor físico.
-ALPHA_EVAP = 1.0 / 3.0
+# alpha de evaporación de Hawking-Kerr (AUDIT.md P0-1): dM/dt = -alpha/M^2 * factor_evap_kerr,
+# t_life_pl = M_pl_units^3/(3*alpha). El código traía alpha=1/3 (heredado de
+# Delta_t = t_pl*(M/M_pl_g)^3, que implícitamente fija 3*alpha=1) -> vida de un PBH de
+# 5e14 g de 6.54e14 s en vez de los ~4.35e17 s (edad del universo) que le corresponden por
+# definición (M* es, por convención estándar en la literatura de PBH, la masa que se estaría
+# evaporando hoy). alpha se calibra resolviendo t_life_pl(5e14 g) = edad_universo con la
+# física de evaporación pura (Fase 2, radiación estándar): alpha = t_pl_s*(M*/M_pl_g)^3 / (3*edad_universo_s).
+# Ver el reporte de P0-1 para cuánto se corre la M* efectiva una vez que se acopla con la
+# fase 1 de acreción (horizon-tracking, P0-4): esa fase mueve la masa de entrada a la fase 2
+# y por tanto corre un poco la M* observada hoy respecto a este valor calibrado en aislamiento.
+ALPHA_EVAP = 5.0077e-4
 
 def put_M_array(Mass_min, Mass_max, num_points_low=7000, num_points_high=7000):
     Mass_cut = 1.0e5
@@ -203,7 +211,7 @@ def diff_rad(ln_rho, initial, M, beta0):
     if ratio_M > 1e90:
         ratio_t = 0.0  
     else:
-        Delta_t = constants.t_pl * (ratio_M**3)
+        Delta_t = constants.t_pl * (ratio_M**3) / (3.0 * ALPHA_EVAP)
         ratio_t = time / Delta_t
 
     factor_evap = np.maximum(1.0 - ratio_t, 0.0)**(1.0 / 3.0)
@@ -216,7 +224,7 @@ def end_evol(ln_rho, initial, M, beta0):
     ratio_M = M / constants.M_pl_g
     if ratio_M > 1e90:
         return 1.0  
-    Delta_t = constants.t_pl * (ratio_M**3)
+    Delta_t = constants.t_pl * (ratio_M**3) / (3.0 * ALPHA_EVAP)
     d_time = diff_rad(ln_rho, initial, M, beta0)[1]
     ratio_t = np.clip(d_time / Delta_t, 0.0, 1.0)
     Mass_end = M * (1.0 - ratio_t)**(1.0 / 3.0)
@@ -305,7 +313,7 @@ def Betas_DM(M_tot, omega):
                 if ratio_M > 1e90:
                     factor_evap_final = 1.0
                 else:
-                    Delta_t = constants.t_pl * (ratio_M**3)
+                    Delta_t = constants.t_pl * (ratio_M**3) / (3.0 * ALPHA_EVAP)
                     factor_evap_final = np.maximum(1.0 - sol_try.y[1][-1] / Delta_t, 0.0)**(1.0 / 3.0)
 
                 y_val = betas_tot[i] * sol_try.y[0][-1] * factor_evap_final
@@ -349,7 +357,7 @@ def Betas_BBN(M_tot, omega):
                                             t_eval=ln_den, args=(M_i, beta), method="DOP853")
                     y_val = beta * sol_try_rel.y[0][-1] * (constants.M_pl_g / M_i)
                 else:
-                    Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3
+                    Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * ALPHA_EVAP)
                     y_val = beta * sol_try.y[0][-1] * (1. - sol_try.y[1][-1] / Delta_t)**(1./3)
             else:
                 y_val = constants.ev2
@@ -383,7 +391,7 @@ def Betas_SD(M_tot, omega):
                 sol_try = solve_ivp(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
                                     events=end_evol, t_eval=ln_den,
                                     args=(M_i, beta), method="DOP853")
-                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3
+                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * ALPHA_EVAP)
                 if len(sol_try.t) > 0:
                     y_val = beta * sol_try.y[0][-1] * (1. - sol_try.y[1][-1] / Delta_t)**(1./3)
                 else:
@@ -419,7 +427,7 @@ def Betas_CMB_AN(M_tot, omega):
                 sol_try = solve_ivp(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
                                     events=end_evol, t_eval=ln_den,
                                     args=(M_i, beta), method="DOP853")
-                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3
+                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * ALPHA_EVAP)
                 if len(sol_try.t) > 0:
                     y_val = beta * sol_try.y[0][-1] * (1. - sol_try.y[1][-1] / Delta_t)**(1./3)
                 else:
@@ -459,7 +467,7 @@ def Betas_GRB(M_tot, omega):
                 sol_try = solve_ivp(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
                                     events=end_evol, t_eval=ln_den,
                                     args=(M_i, beta), method="DOP853")
-                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3
+                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * ALPHA_EVAP)
                 if len(sol_try.t) > 0:
                     y_val = beta * sol_try.y[0][-1] * (1. - sol_try.y[1][-1] / Delta_t)**(1./3)
                 else:
@@ -476,7 +484,7 @@ def Betas_GRB(M_tot, omega):
                 sol_try = solve_ivp(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
                                     events=end_evol, t_eval=ln_den,
                                     args=(M_i, beta), method="DOP853")
-                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3
+                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * ALPHA_EVAP)
                 if len(sol_try.t) > 0:
                     y_val = beta * sol_try.y[0][-1] * (1. - sol_try.y[1][-1] / Delta_t)**(1./3)
                 else:
@@ -512,7 +520,7 @@ def Betas_Reio(M_tot, omega):
                 sol_try = solve_ivp(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
                                     events=end_evol, t_eval=ln_den,
                                     args=(M_i, beta), method="DOP853")
-                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3
+                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * ALPHA_EVAP)
                 if len(sol_try.t) > 0:
                     y_val = beta * sol_try.y[0][-1] * (1. - sol_try.y[1][-1] / Delta_t)**(1./3)
                 else:
@@ -552,7 +560,7 @@ def Betas_LSP(M_tot, w):
                                             t_eval=ln_den, args=(M_i, beta), method="DOP853")
                     y_val = beta * sol_try_rel.y[0][-1] * (constants.M_pl_g / M_i)
                 else:
-                    Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3
+                    Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * ALPHA_EVAP)
                     y_val = beta * sol_try.y[0][-1] * (1. - sol_try.y[1][-1] / Delta_t)**(1./3)
 
         constraints.betas_LSP_tot.append(beta)
