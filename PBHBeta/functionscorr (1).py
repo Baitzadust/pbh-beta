@@ -197,6 +197,17 @@ def aplicar_corrimiento_acrecion(M_tot, M_f_tot, betas_sbb_full):
 # RESTRICCIONES ESTÁNDAR SBB (Época de dominancia de radiación)
 # ---------------------------------------------------------------------------
 
+def _solve_ivp_checked(*args, **kwargs):
+    """Envoltura de scipy.solve_ivp (AUDIT.md P0-2/P1-6): truena si el integrador
+    falla en vez de devolver un resultado parcial en silencio. status=1 (terminó
+    por el evento `end_evol`, el PBH llegó a M_pl antes de ln_den_end_) es un
+    resultado válido y esperado en este módulo; sólo status=-1 (falla del paso)
+    se trata como error."""
+    sol = solve_ivp(*args, **kwargs)
+    if sol.status == -1:
+        raise RuntimeError(f"solve_ivp falló (status=-1): {sol.message}")
+    return sol
+
 def diff_rad_rel(ln_rho, initial, M, beta0):
     b    = initial[0]
     Om_0 = beta0 * b * (constants.M_pl_g / M)
@@ -225,8 +236,8 @@ def end_evol(ln_rho, initial, M, beta0):
     if ratio_M > 1e90:
         return 1.0  
     Delta_t = constants.t_pl * (ratio_M**3) / (3.0 * ALPHA_EVAP)
-    d_time = diff_rad(ln_rho, initial, M, beta0)[1]
-    ratio_t = np.clip(d_time / Delta_t, 0.0, 1.0)
+    d_time = initial[1]
+    ratio_t = np.minimum(d_time / Delta_t, 1.0)
     Mass_end = M * (1.0 - ratio_t)**(1.0 / 3.0)
     return Mass_end - constants.M_pl_g
 
@@ -291,18 +302,18 @@ def Betas_DM(M_tot, omega):
         ln_den = np.linspace(ln_den_f, ln_den_end_, 10000)
 
         if M_i <= 1.05 * constants.M_pl_g:
-            sol_try_rel = solve_ivp(diff_rad_rel, (ln_den_f, ln_den_end_), np.array([1.]),
+            sol_try_rel = _solve_ivp_checked(diff_rad_rel, (ln_den_f, ln_den_end_), np.array([1.]),
                                     t_eval=ln_den, args=(constants.M_pl_g, betas_tot[i]), method="DOP853")
             y_val = betas_tot[i] * sol_try_rel.y[0][-1]
             Omegas_relic.append(y_val)
             M_dm_rel.append(M_tot[i])
         else:
-            sol_try = solve_ivp(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
+            sol_try = _solve_ivp_checked(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
                                 events=end_evol, t_eval=ln_den,
                                 args=(M_i, betas_tot[i]), method="DOP853")
 
             if len(sol_try.t) == 0 or sol_try.t[-1] > ln_den_end_:
-                sol_try_rel = solve_ivp(diff_rad_rel, (ln_den_f, ln_den_end_), np.array([1.]),
+                sol_try_rel = _solve_ivp_checked(diff_rad_rel, (ln_den_f, ln_den_end_), np.array([1.]),
                                         t_eval=ln_den, args=(M_i, betas_tot[i]), method="DOP853")
                 y_val = betas_tot[i] * sol_try_rel.y[0][-1] * (constants.M_pl_g / M_i)
                 if M_i < 1e11 * constants.M_pl_g:
@@ -349,11 +360,11 @@ def Betas_BBN(M_tot, omega):
 
             if ln_den_f > ln_den_end_:
                 ln_den = np.linspace(ln_den_f, ln_den_end_, 10000)
-                sol_try = solve_ivp(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
+                sol_try = _solve_ivp_checked(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
                                     events=end_evol, t_eval=ln_den,
                                     args=(M_i, beta), method="DOP853")
                 if len(sol_try.t) == 0 or (sol_try.t[-1] > ln_den_end_ and M_i < constraints.data_mass[76]):
-                    sol_try_rel = solve_ivp(diff_rad_rel, (ln_den_f, ln_den_end_), np.array([1.]),
+                    sol_try_rel = _solve_ivp_checked(diff_rad_rel, (ln_den_f, ln_den_end_), np.array([1.]),
                                             t_eval=ln_den, args=(M_i, beta), method="DOP853")
                     y_val = beta * sol_try_rel.y[0][-1] * (constants.M_pl_g / M_i)
                 else:
@@ -388,7 +399,7 @@ def Betas_SD(M_tot, omega):
             ln_den_f = np.log(rho_form_rad[i])
             if ln_den_f > ln_den_end_:
                 ln_den = np.linspace(ln_den_f, ln_den_end_, 10000)
-                sol_try = solve_ivp(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
+                sol_try = _solve_ivp_checked(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
                                     events=end_evol, t_eval=ln_den,
                                     args=(M_i, beta), method="DOP853")
                 Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * ALPHA_EVAP)
@@ -424,7 +435,7 @@ def Betas_CMB_AN(M_tot, omega):
             ln_den_f = np.log(rho_form_rad[i])
             if ln_den_f > ln_den_end_:
                 ln_den = np.linspace(ln_den_f, ln_den_end_, 10000)
-                sol_try = solve_ivp(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
+                sol_try = _solve_ivp_checked(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
                                     events=end_evol, t_eval=ln_den,
                                     args=(M_i, beta), method="DOP853")
                 Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * ALPHA_EVAP)
@@ -464,7 +475,7 @@ def Betas_GRB(M_tot, omega):
 
             if ln_den_f > ln_den_end_:
                 ln_den = np.linspace(ln_den_f, ln_den_end_, 10000)
-                sol_try = solve_ivp(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
+                sol_try = _solve_ivp_checked(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
                                     events=end_evol, t_eval=ln_den,
                                     args=(M_i, beta), method="DOP853")
                 Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * ALPHA_EVAP)
@@ -481,7 +492,7 @@ def Betas_GRB(M_tot, omega):
 
             if ln_den_f > ln_den_end_:
                 ln_den = np.linspace(ln_den_f, ln_den_end_, 10000)
-                sol_try = solve_ivp(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
+                sol_try = _solve_ivp_checked(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
                                     events=end_evol, t_eval=ln_den,
                                     args=(M_i, beta), method="DOP853")
                 Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * ALPHA_EVAP)
@@ -517,7 +528,7 @@ def Betas_Reio(M_tot, omega):
 
             if ln_den_f > ln_den_end_:
                 ln_den = np.linspace(ln_den_f, ln_den_end_, 10000)
-                sol_try = solve_ivp(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
+                sol_try = _solve_ivp_checked(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
                                     events=end_evol, t_eval=ln_den,
                                     args=(M_i, beta), method="DOP853")
                 Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * ALPHA_EVAP)
@@ -551,12 +562,12 @@ def Betas_LSP(M_tot, w):
             ln_den_f = np.log(rho_form_rad[i])
             if ln_den_f > ln_den_end_:
                 ln_den = np.linspace(ln_den_f, ln_den_end_, 10000)
-                sol_try = solve_ivp(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
+                sol_try = _solve_ivp_checked(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
                                     events=end_evol, t_eval=ln_den,
                                     args=(M_i, beta), method="DOP853")
                 
                 if len(sol_try.t) == 0 or sol_try.t[-1] > ln_den_end_:
-                    sol_try_rel = solve_ivp(diff_rad_rel, (ln_den_f, ln_den_end_), np.array([1.]),
+                    sol_try_rel = _solve_ivp_checked(diff_rad_rel, (ln_den_f, ln_den_end_), np.array([1.]),
                                             t_eval=ln_den, args=(M_i, beta), method="DOP853")
                     y_val = beta * sol_try_rel.y[0][-1] * (constants.M_pl_g / M_i)
                 else:
