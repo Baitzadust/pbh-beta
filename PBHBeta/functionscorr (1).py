@@ -18,9 +18,20 @@ from scipy.optimize import brentq
 # ---------------------------------------------------------------------------
 M_pl_GeV = 1.22089e19
 M_pl_g = 2.17645e-5
-H_end_GeV = 4.44e13       
-H_end_pl  = H_end_GeV / M_pl_GeV   
+H_end_GeV = 4.44e13
+H_end_pl  = H_end_GeV / M_pl_GeV
 n = 100.00
+
+# Modelo de acreción (paper, ec. 2.13+2.15 — AUDIT.md P0-4, Opción A):
+# dlnM/dN = min(3 L_eff x / 8pi, 3 gamma_H / 2x). Rama Michel (x* = 4pi/L_eff): INESTABLE.
+# Rama cap (x -> gamma_H): ESTABLE, horizon-tracking (M ~ M_H). Reemplaza el modelo
+# saturante 3*lambda*x*(1-x)*Omega_phi, que no depende de N_re y no es el del paper.
+L_ACC_DEFAULT = 102.0   # L del paper; L > 4*pi*GAMMA_H ~ 12.6 pone al PBH en horizon-tracking
+GAMMA_H = 1.0            # gamma^MD, convención PBHBeta (ver PBHBeta/BfM.py: "no bien conocido, se adopta 1")
+
+# alpha de evaporación de Hawking-Kerr (AUDIT.md P0-1): dM/dt = -alpha/M^2 * factor_evap_kerr.
+# alpha = 1/3 (heredado de Delta_t = t_pl*(M/M_pl_g)^3 de PBHBeta) es 333x el valor físico.
+ALPHA_EVAP = 1.0 / 3.0
 
 def put_M_array(Mass_min, Mass_max, num_points_low=7000, num_points_high=7000):
     Mass_cut = 1.0e5
@@ -50,7 +61,7 @@ def put_M_array(Mass_min, Mass_max, num_points_low=7000, num_points_high=7000):
 # ---------------------------------------------------------------------------
 @eqx.filter_jit
 @functools.partial(jax.vmap, in_axes=(0, None, None, None))
-def precalcular_acreccion_lote(Mi_val_g, N_fin, a_star, lam=1.0):
+def precalcular_acreccion_lote(Mi_val_g, N_fin, a_star, L_acc=L_ACC_DEFAULT):
     M_i_pl = Mi_val_g / M_pl_g
     M_end_pl = 1.0 / H_end_pl
     N_ini = (2.0 / 3.0) * jnp.log(jnp.maximum(M_i_pl / M_end_pl, 1.0)) 
@@ -97,18 +108,20 @@ def precalcular_acreccion_lote(Mi_val_g, N_fin, a_star, lam=1.0):
         z = 2.0 * M_actual * mu_pl
         S_onda = (z**2.0) / (1.0 + z**2.0)
         
-        # 1. Tasa de Acreción de Bondi estricta acoplada al campo escalar
-        lambda_eff = lam * factor_espin_acc * S_onda
-        dlnM_dN_acc = 3.0 * lambda_eff * x * jnp.maximum(1.0 - x, 0.0) * Omega_phi
-        
+        # 1. Tasa de acreción tipo Michel/Bondi con cap de horizon-tracking (ver constantes
+        #    L_ACC_DEFAULT / GAMMA_H arriba y AUDIT.md P0-4).
+        L_eff = L_acc * factor_espin_acc * S_onda * Omega_phi
+        dlnM_dN_michel = 3.0 * L_eff * x / (8.0 * jnp.pi)
+        dlnM_dN_cap = 3.0 * GAMMA_H / (2.0 * jnp.maximum(x, 1e-12))
+        dlnM_dN_acc = jnp.minimum(dlnM_dN_michel, dlnM_dN_cap)
+
         # 2. Evaporación de Hawking-Kerr
-        dM_dt_evap_pl = - (1.0 / (3.0 * jnp.maximum(M_actual**2.0, 1.0))) * factor_evap_kerr
+        dM_dt_evap_pl = - (ALPHA_EVAP / jnp.maximum(M_actual**2.0, 1.0)) * factor_evap_kerr
         dlnM_dN_evap = (dM_dt_evap_pl / H_val) / M_actual
-        
+
         factor_apagado = 0.5 * (1.0 + jnp.tanh(u_safe * 3.0))
         du_dN = (dlnM_dN_acc + dlnM_dN_evap) * factor_apagado
-        
-        du_dN = jnp.where(x >= 0.999, 0.0, du_dN)
+
         return jnp.where(u_safe < 0.0, 0.0, du_dN)
 
     term = ODETerm(vector_field_log)
