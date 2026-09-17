@@ -160,37 +160,46 @@ def precalcular_acreccion_lote(Mi_val_g, N_fin, a_star, L_acc=L_ACC_DEFAULT):
 # ---------------------------------------------------------------------------
 
 def aplicar_corrimiento_acrecion(M_tot, M_f_tot, betas_sbb_full):
-    beta_acc = np.full_like(M_tot, constants.ev1, dtype=np.float64)
-    
+    # AUDIT.md P0-3: antes se inicializaba con constants.ev1 (1e-5) y, si mu>1.01 pero
+    # M_f caía fuera del rango tabulado de betas_sbb_full, ninguna rama de abajo lo
+    # sobreescribía -> ese centinela (una beta enorme y falsa) se colaba a las figuras
+    # sin aviso. Se inicializa con np.nan ("no calculable") en su lugar: no hay una
+    # extrapolación físicamente honesta de la restricción SBB fuera de su rango
+    # tabulado, así que se deja el punto explícitamente vacío (NaN) en vez de rellenarlo
+    # con un valor arbitrario. Los consumidores del notebook (`clean_beta`) ya tratan
+    # NaN como "no graficar aquí".
+    beta_acc = np.full_like(M_tot, np.nan, dtype=np.float64)
+
     mask_valid = betas_sbb_full != constants.ev1
     if not np.any(mask_valid):
         return beta_acc
-        
+
     interpolador = interp1d(
-        np.log10(M_tot[mask_valid]), 
-        np.log10(betas_sbb_full[mask_valid]), 
+        np.log10(M_tot[mask_valid]),
+        np.log10(betas_sbb_full[mask_valid]),
         kind='linear', bounds_error=False, fill_value=np.nan
     )
-    
+
     log_Mf = np.log10(M_f_tot)
     log_bf = interpolador(log_Mf)
-    
+
+    # AUDIT.md P0-5: antes había dos fórmulas que no coincidían en la frontera mu=1.01
+    # (beta_SBB(1.01*M_i)/1.01 != beta_SBB(M_i) en general). Se usa una sola fórmula
+    # continua, beta_SBB(M_f)/mu, para todo mu; se reduce exactamente a beta_SBB(M_i)
+    # en el límite mu->1 porque M_f->M_i ahí, así que no hace falta una rama aparte.
     for i in range(len(M_tot)):
         Mf = M_f_tot[i]
         Mi = M_tot[i]
         mu = Mf / Mi
-        
-        # 1. RÉGIMEN DE RELIQUIAS (Dominado por Evaporación)
-        # Si el PBH pierde masa o se queda igual (mu <= 1.01 para absorber ruido numérico),
-        # está destinado a ser una reliquia. La restricción es idéntica a SBB.
-        if mu <= 1.01:
-            beta_acc[i] = betas_sbb_full[i]
-            
-        # 2. RÉGIMEN DE ACRECIÓN (Dominado por Acreción)
-        # Solo aplicamos el corrimiento si el PBH realmente ganó masa y saltó la barrera.
-        elif not np.isnan(log_bf[i]):
+
+        if not np.isnan(log_bf[i]):
             beta_acc[i] = (10.0**log_bf[i]) / mu
-                
+        elif mu <= 1.01:
+            # M_f cae fuera del rango tabulado, pero mu~1 (M_f~M_i): se usa el valor
+            # SBB directo en M_i como aproximación (el error introducido es O(mu-1)).
+            beta_acc[i] = betas_sbb_full[i]
+        # else: mu > 1.01 y M_f fuera de rango tabulado -> no calculable, queda NaN (P0-3).
+
     return beta_acc
 
 # ---------------------------------------------------------------------------
