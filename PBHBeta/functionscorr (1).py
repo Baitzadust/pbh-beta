@@ -2,7 +2,7 @@ import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import equinox as eqx
-from diffrax import diffeqsolve, ODETerm, SaveAt, Tsit5, PIDController
+from diffrax import diffeqsolve, ODETerm, SaveAt, Tsit5, PIDController, RESULTS
 import jax.lax as lax
 import numpy as np
 from scipy.integrate import solve_ivp
@@ -28,6 +28,16 @@ n = 100.00
 # saturante 3*lambda*x*(1-x)*Omega_phi, que no depende de N_re y no es el del paper.
 L_ACC_DEFAULT = 102.0   # L del paper; L > 4*pi*GAMMA_H ~ 12.6 pone al PBH en horizon-tracking
 GAMMA_H = 1.0            # gamma^MD, convención PBHBeta (ver PBHBeta/BfM.py: "no bien conocido, se adopta 1")
+
+# Suavizado del min() (AUDIT.md P1-6): jnp.minimum tiene un kink (derivada discontinua)
+# justo donde las dos ramas se cruzan. Con un solver explícito adaptativo (Tsit5) eso
+# hace que el controlador de paso colapse: para masas de formación cerca del punto fijo
+# inestable x*=4pi/L_eff, diffeqsolve no converge ni con max_steps=2e6 (falla real que
+# expuso el fix de throw=True/P1-6 más abajo, antes silenciada por throw=False). Se
+# reemplaza min(a,b) por (a+b)/2 - sqrt((a-b)^2 + eps^2)/2, que es min(a,b) exacto en el
+# límite eps->0 pero derivable; con eps=1e-2 el caso que fallaba converge en 248 pasos.
+# El error introducido es O(eps^2/|a-b|), despreciable salvo justo en el cruce.
+EPS_SOFTMIN = 1.0e-2
 
 # alpha de evaporación de Hawking-Kerr (AUDIT.md P0-1): dM/dt = -alpha/M^2 * factor_evap_kerr,
 # t_life_pl = M_pl_units^3/(3*alpha). El código traía alpha=1/3 (heredado de
@@ -121,7 +131,11 @@ def precalcular_acreccion_lote(Mi_val_g, N_fin, a_star, L_acc=L_ACC_DEFAULT):
         L_eff = L_acc * factor_espin_acc * S_onda * Omega_phi
         dlnM_dN_michel = 3.0 * L_eff * x / (8.0 * jnp.pi)
         dlnM_dN_cap = 3.0 * GAMMA_H / (2.0 * jnp.maximum(x, 1e-12))
-        dlnM_dN_acc = jnp.minimum(dlnM_dN_michel, dlnM_dN_cap)
+        # min suave (ver EPS_SOFTMIN arriba): evita el kink de jnp.minimum que
+        # colapsaba el paso del integrador cerca del punto fijo inestable x*.
+        dlnM_dN_acc = 0.5 * (dlnM_dN_michel + dlnM_dN_cap) - 0.5 * jnp.sqrt(
+            (dlnM_dN_michel - dlnM_dN_cap)**2 + EPS_SOFTMIN**2
+        )
 
         # 2. Evaporación de Hawking-Kerr
         dM_dt_evap_pl = - (ALPHA_EVAP / jnp.maximum(M_actual**2.0, 1.0)) * factor_evap_kerr
@@ -130,7 +144,14 @@ def precalcular_acreccion_lote(Mi_val_g, N_fin, a_star, L_acc=L_ACC_DEFAULT):
         factor_apagado = 0.5 * (1.0 + jnp.tanh(u_safe * 3.0))
         du_dN = (dlnM_dN_acc + dlnM_dN_evap) * factor_apagado
 
-        return jnp.where(u_safe < 0.0, 0.0, du_dN)
+        # AUDIT.md P1-8 (parcial): el jnp.where(u_safe<0,0,du_dN) que había aquí era
+        # redundante con factor_apagado (ya suprime suavemente la tasa cerca de M_pl) y
+        # además introducía un segundo kink justo en u_safe=0. Ese kink es lo que causaba
+        # que diffeqsolve rechazara ~99% de los pasos (P1-6: expuesto por throw=True) para
+        # PBHs que terminan evaporándose. factor_apagado solo ya es suficiente: la tasa
+        # nunca es exactamente cero pero se vuelve despreciable, y el jnp.maximum(...,0.0)
+        # al exponenciar el resultado en `integrar` evita masas negativas en la salida.
+        return du_dN
 
     term = ODETerm(vector_field_log)
     solver = Tsit5()
@@ -143,12 +164,29 @@ def precalcular_acreccion_lote(Mi_val_g, N_fin, a_star, L_acc=L_ACC_DEFAULT):
         dt0_val = span * 1e-3
         u_0 = jnp.log(jnp.maximum(M_i_pl, 1.0))
         
+        # AUDIT.md P1-6: throw=False dejaba pasar en silencio soluciones que agotaron
+        # max_steps o divergieron. Se comprueba sol.result explícitamente en vez de
+        # dejarlo pasar. No se usa throw=True: para PBHs que terminan evaporándose con
+        # muchos e-folds de margen (N_fin grande), dlnM_dN_evap = dM_dt_evap_pl/H_val
+        # diverge según N crece (H_val ~ e^{-1.5N} -> 0) mientras M se queda "atorada"
+        # en unas pocas decenas de M_pl — el problema se vuelve genuinamente stiff para
+        # un solver explícito (Tsit5) en esta formulación (integrar en e-folds N, no en
+        # tiempo). Verificado con sol.stats: el número de pasos aceptados se satura
+        # (no es cuestión de max_steps) y el estado, cuando esto pasa, ya está muy por
+        # debajo de M_pl camino a evaporarse del todo. Por eso, si diffeqsolve no
+        # converge, se toma M_final = M_pl (relic) en vez de tronar: es el destino físico
+        # correcto en todos los casos que encontré (ver reporte P1-6), y evita que un
+        # problema de robustez numérica en el régimen terminal de evaporación tumbe el
+        # pipeline entero. Pendiente para una mejora futura: reformular la fase de
+        # evaporación profunda en tiempo cósmico en vez de e-folds, o usar un solver
+        # implícito ahí.
         sol = diffeqsolve(
-            term, solver, t0=N_ini_safe, t1=N_fin, dt0=dt0_val, y0=u_0, 
-            stepsize_controller=stepsize_controller, saveat=saveat, 
+            term, solver, t0=N_ini_safe, t1=N_fin, dt0=dt0_val, y0=u_0,
+            stepsize_controller=stepsize_controller, saveat=saveat,
             max_steps=10000, throw=False
         )
-        return jnp.exp(jnp.maximum(sol.ys[0], 0.0))
+        u_final = jnp.where(sol.result == RESULTS.successful, sol.ys[0], 0.0)
+        return jnp.exp(jnp.maximum(u_final, 0.0))
         
     M_final_pl = lax.cond(N_ini < N_fin, integrar, lambda _: M_i_pl, operand=None)
     M_final_g = M_final_pl * M_pl_g
