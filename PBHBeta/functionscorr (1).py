@@ -39,6 +39,12 @@ GAMMA_H = 1.0            # gamma^MD, convención PBHBeta (ver PBHBeta/BfM.py: "n
 # El error introducido es O(eps^2/|a-b|), despreciable salvo justo en el cruce.
 EPS_SOFTMIN = 1.0e-2
 
+# AUDIT.md P1-11: umbral único de "es reliquia de Planck". Antes Betas_DM usaba 1.05 y
+# las otras seis funciones (BBN/SD/CMB_AN/GRB/Reio/LSP) usaban 1.5*M_pl_g, mezclando dos
+# definiciones de la frontera en M in [1.05,1.5]*M_pl_g dentro de get_Betas_full (toma
+# min() sobre los siete canales). Se usa 1.5 (el valor que ya tenían seis de siete).
+LIMITE_PLANCK_G = 1.5 * constants.M_pl_g
+
 # alpha de evaporación de Hawking-Kerr (AUDIT.md P0-1): dM/dt = -alpha/M^2 * factor_evap_kerr,
 # t_life_pl = M_pl_units^3/(3*alpha). El código traía alpha=1/3 (heredado de
 # Delta_t = t_pl*(M/M_pl_g)^3, que implícitamente fija 3*alpha=1) -> vida de un PBH de
@@ -326,7 +332,6 @@ def Betas_DM(M_tot, omega):
 
     rho_form_rad = rho_f(M_tot, omega)
     ln_den_end_  = np.log(constants.rho_end)
-    limite_planck = 1.05 * constants.M_pl_g
 
     for i in range(len(M_tot)):
         M_i = M_tot[i]
@@ -341,12 +346,16 @@ def Betas_DM(M_tot, omega):
             betas_relic_prim.append(beta_std)
             betas_tot.append(betas_relic_prim[-1] / constants.gam_rad**0.5)
         else:
-            betas_tot.append(constants.ev1)
-            
+            # AUDIT.md P1-12: antes constants.ev1 (1e-5), y el chequeo de abajo comparaba
+            # contra DOS valores posibles (ev1 y ev1/gam_rad**0.5) con `==` sobre floats,
+            # señal de que el centinela no era único. np.nan + np.isnan es inequívoco y no
+            # depende de si el valor se dividió por gam_rad**0.5 en otra rama o no.
+            betas_tot.append(np.nan)
+
     constraints.betas_DM_tot = np.array(betas_tot)
 
     for i in range(len(M_tot)):
-        if i >= len(betas_tot) or betas_tot[i] == constants.ev1 / constants.gam_rad**0.5 or betas_tot[i] == constants.ev1:
+        if i >= len(betas_tot) or np.isnan(betas_tot[i]):
             Omegas_tot.append(constants.ev2)
             continue
         M_i = M_tot[i]
@@ -357,7 +366,7 @@ def Betas_DM(M_tot, omega):
             continue
         ln_den = np.linspace(ln_den_f, ln_den_end_, 10000)
 
-        if M_i <= 1.05 * constants.M_pl_g:
+        if M_i <= LIMITE_PLANCK_G:
             sol_try_rel = _solve_ivp_checked(diff_rad_rel, (ln_den_f, ln_den_end_), np.array([1.]),
                                     t_eval=ln_den, args=(constants.M_pl_g, betas_tot[i]), method="DOP853")
             y_val = betas_tot[i] * sol_try_rel.y[0][-1]
@@ -398,7 +407,7 @@ def Betas_BBN(M_tot, omega):
     betas_bbn, M_bbn, Omegas_bbn_tot = [], [], []
     rho_form_rad = rho_f(M_tot, omega)
     ln_den_end_ = np.log(constants.rho_end)
-    limite_planck = 1.5 * constants.M_pl_g
+    limite_planck = LIMITE_PLANCK_G
 
     for i in range(len(M_tot)):
         M_i = M_tot[i]
@@ -443,7 +452,7 @@ def Betas_SD(M_tot, omega):
     betas_sd, M_sd, Omegas_sd_tot = [], [], []
     rho_form_rad = rho_f(M_tot, omega)
     ln_den_end_ = np.log(constants.rho_end)
-    limite_planck = 1.5 * constants.M_pl_g
+    limite_planck = LIMITE_PLANCK_G
 
     for i in range(len(M_tot)):
         M_i = M_tot[i]
@@ -479,7 +488,7 @@ def Betas_CMB_AN(M_tot, omega):
     betas_an, M_an, Omegas_an_tot = [], [], []
     rho_form_rad = rho_f(M_tot, omega)
     ln_den_end_ = np.log(constants.rho_end)
-    limite_planck = 1.5 * constants.M_pl_g
+    limite_planck = LIMITE_PLANCK_G
 
     for i in range(len(M_tot)):
         M_i = M_tot[i]
@@ -516,7 +525,7 @@ def Betas_GRB(M_tot, omega):
     Omegas_grb1, Omegas_grb2 = [], []
     rho_form_rad = rho_f(M_tot, omega)
     ln_den_end_ = np.log(constants.rho_end)
-    limite_planck = 1.5 * constants.M_pl_g
+    limite_planck = LIMITE_PLANCK_G
 
     for i in range(len(M_tot)):
         M_i = M_tot[i]
@@ -569,7 +578,7 @@ def Betas_Reio(M_tot, omega):
     betas_reio, M_reio = [], []
     rho_form_rad = rho_f(M_tot, omega)
     ln_den_end_ = np.log(constants.rho_end)
-    limite_planck = 1.5 * constants.M_pl_g
+    limite_planck = LIMITE_PLANCK_G
 
     for i in range(len(M_tot)):
         M_i = M_tot[i]
@@ -603,7 +612,7 @@ def Betas_LSP(M_tot, w):
     betas_lsp, M_lsp = [], []
     rho_form_rad = rho_f(M_tot, w)
     ln_den_end_ = np.log(constants.rho_end)
-    limite_planck = 1.5 * constants.M_pl_g
+    limite_planck = LIMITE_PLANCK_G
 
     for i in range(len(M_tot)):
         M_i = M_tot[i]
@@ -656,7 +665,11 @@ def get_Betas_full(M_tot):
         if Reio_tot.size: values.append(Reio_tot[i])
         if LSP_tot.size:  values.append(LSP_tot[i])
         if values:
-            constraints.betas_full[i] = min(values)
+            # np.nanmin, no min(): P1-12 hace que el canal DM pueda venir como np.nan.
+            # min() de Python con NaN depende del orden (si el NaN es el primer elemento,
+            # min() devuelve NaN aunque haya valores reales después) — np.nanmin lo ignora
+            # correctamente y sólo da NaN si TODOS los canales son NaN.
+            constraints.betas_full[i] = np.nanmin(values)
     return constraints.betas_full
 
 def get_Omegas_full(M_tot):
@@ -679,5 +692,8 @@ def get_Omegas_full(M_tot):
         if Reio_tot.size: values.append(Reio_tot[i])
         if LSP_tot.size:  values.append(LSP_tot[i])
         if values:
-            constraints.Omegas_full[i] = min(values)
+            # np.nanmin por la misma razón que en get_Betas_full (consistencia/defensivo;
+            # Omega_DM_tot usa constants.ev2 como centinela, no NaN, así que hoy no cambia
+            # el resultado, pero evita el mismo landmine si eso cambia más adelante).
+            constraints.Omegas_full[i] = np.nanmin(values)
     return constraints.Omegas_full
