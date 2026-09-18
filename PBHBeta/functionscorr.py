@@ -339,6 +339,101 @@ def precalcular_acreccion_lote(Mi_val_g, N_fin, a_star, L_acc=None, regime="wave
             assert_subcritical(float(L_acc), a_star=a_star_scalar, gamma_form=gamma_eff)
     return _precalcular_acreccion_lote_impl(Mi_val_g, N_fin, a_star, L_acc, regime, gamma_eff)
 
+
+@eqx.filter_jit
+def _trayectoria_pbh_impl(Mi_val_g, N_fin, a_star, L_acc, regime, gamma_form, N_puntos):
+    """Misma física que _precalcular_acreccion_lote_impl (Tarea 1/2/4), pero devuelve la
+    trayectoria completa M(N) en vez de sólo el valor final — para graficar M_pbh(N) vs
+    M_H(N) (Tarea 6, celda 9 del notebook, que antes tenía su PROPIA copia del modelo
+    viejo (1-x)/alpha=1/3 y se había quedado desincronizada del módulo real). Duplica la
+    construcción del campo vectorial de _precalcular_acreccion_lote_impl a propósito
+    (jax.vmap con SaveAt(t1=True) y esta función con SaveAt(ts=...) no comparten
+    fácilmente el cuerpo sin refactorizar la firma pública) — mantener ambas en sync si
+    se toca el modelo de acreción."""
+    M_i_pl = Mi_val_g / M_pl_g
+    M_end_pl = 1.0 / H_end_pl
+    N_ini = (2.0 / 3.0) * jnp.log(jnp.maximum(M_i_pl / (gamma_form * M_end_pl), 1.0))
+    a_star_safe = jnp.clip(a_star, 0.0, 0.9999)
+
+    mu_pl = n * H_end_pl
+    rho_end_inf_pl = (3.0 * H_end_pl**2.0) / (8.0 * jnp.pi)
+    phi_ini_pl = jnp.sqrt(2.0 * rho_end_inf_pl / (mu_pl**2.0 + 9.0 * H_end_pl**2.0 / 4.0))
+
+    raiz_espin = jnp.sqrt(1.0 - a_star_safe**2.0)
+    factor_espin_acc = ((1.0 + raiz_espin) / 2.0)**2.0
+    factor_T_kerr = (2.0 * raiz_espin) / (1.0 + raiz_espin)
+    factor_Area_kerr = 0.5 * (1.0 + raiz_espin)
+    factor_evap_kerr = (factor_T_kerr**4.0) * factor_Area_kerr
+
+    def rho_inf_field_env(N):
+        return 0.5 * (phi_ini_pl * mu_pl)**2 * jnp.exp(-3.0 * N)
+
+    def vector_field_log(N, u, args):
+        H_val = H_end_pl * jnp.exp(-1.5 * N)
+        M_H_actual = 1.0 / H_val
+        u_H = jnp.log(M_H_actual)
+        u_safe = jnp.clip(u, -1.0, u_H)
+        M_actual = jnp.exp(u_safe)
+        x = M_actual / M_H_actual
+
+        rho_phi = rho_inf_field_env(N)
+        rho_crit = 3.0 * H_val**2.0 / (8.0 * jnp.pi)
+        Omega_phi = rho_phi / rho_crit
+
+        z = 2.0 * M_actual * mu_pl
+        S_onda = (z**2.0) / (1.0 + z**2.0)
+
+        L_eff = L_acc * factor_espin_acc * S_onda * Omega_phi
+        if regime == "wave":
+            dlnM_dN_acc = 3.0 * L_eff * x / (8.0 * jnp.pi)
+        elif regime == "horizon_tracking":
+            dlnM_dN_michel = 3.0 * L_eff * x / (8.0 * jnp.pi)
+            dlnM_dN_cap = 3.0 * GAMMA_H / (2.0 * jnp.maximum(x, 1e-12))
+            dlnM_dN_acc = 0.5 * (dlnM_dN_michel + dlnM_dN_cap) - 0.5 * jnp.sqrt(
+                (dlnM_dN_michel - dlnM_dN_cap)**2 + EPS_SOFTMIN**2
+            )
+        else:
+            raise ValueError(f"regime debe ser 'wave' u 'horizon_tracking', no {regime!r}")
+
+        alpha_local = alpha_of_mass_g(M_actual * M_pl_g)
+        dM_dt_evap_pl = - (alpha_local / jnp.maximum(M_actual**2.0, 1.0)) * factor_evap_kerr
+        dlnM_dN_evap = (dM_dt_evap_pl / H_val) / M_actual
+
+        factor_apagado = 0.5 * (1.0 + jnp.tanh(u_safe * 3.0))
+        du_dN = (dlnM_dN_acc + dlnM_dN_evap) * factor_apagado
+        return jnp.where(N < N_ini, 0.0, du_dN)
+
+    ts_eval = jnp.linspace(0.0, N_fin, N_puntos)
+    term = ODETerm(vector_field_log)
+    solver = Tsit5()
+    stepsize_controller = PIDController(rtol=1e-5, atol=1e-5, jump_ts=jnp.array([N_ini]))
+    u_0 = jnp.log(jnp.maximum(M_i_pl, 1.0))
+    dt0_val = jnp.maximum(N_fin, 1.0) / N_puntos * 0.1
+
+    sol = diffeqsolve(
+        term, solver, t0=0.0, t1=N_fin, dt0=dt0_val, y0=u_0,
+        stepsize_controller=stepsize_controller, saveat=SaveAt(ts=ts_eval),
+        max_steps=20000, throw=False,
+    )
+    u_final = jnp.where(sol.result == RESULTS.successful, sol.ys, 0.0)
+    M_pbh_g = jnp.exp(jnp.maximum(u_final, 0.0)) * M_pl_g
+    M_H_g = (1.0 / (H_end_pl * jnp.exp(-1.5 * ts_eval))) * M_pl_g
+    return ts_eval, M_pbh_g, M_H_g, N_ini
+
+
+def trayectoria_pbh_vs_horizonte(Mi_val_g, N_fin, a_star, L_acc=None, regime="wave",
+                                  gamma_form=GAMMA_COLAPSO, N_puntos=1000):
+    """Trayectoria M_pbh(N) vs M_H(N) para un solo PBH (Tarea 6, celda 9 del notebook).
+    Mismos regímenes/parámetros que precalcular_acreccion_lote."""
+    if regime not in ("wave", "horizon_tracking"):
+        raise ValueError(f"regime debe ser 'wave' u 'horizon_tracking', no {regime!r}")
+    if L_acc is None:
+        L_acc = L_ACC_DEFAULT if regime == "wave" else L_ACC_HORIZON_TRACKING_DEFAULT
+    gamma_eff = gamma_form if regime == "wave" else 1.0
+    if regime == "wave":
+        assert_subcritical(float(L_acc), a_star=float(a_star), gamma_form=gamma_eff)
+    return _trayectoria_pbh_impl(Mi_val_g, N_fin, a_star, L_acc, regime, gamma_eff, N_puntos)
+
 # ---------------------------------------------------------------------------
 # Corrimiento de restricciones
 # ---------------------------------------------------------------------------
