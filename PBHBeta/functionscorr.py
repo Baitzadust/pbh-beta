@@ -72,17 +72,62 @@ EPS_SOFTMIN = 1.0e-2
 # min() sobre los siete canales). Se usa 1.5 (el valor que ya tenían seis de siete).
 LIMITE_PLANCK_G = 1.5 * constants.M_pl_g
 
-# alpha de evaporación de Hawking-Kerr (AUDIT.md P0-1): dM/dt = -alpha/M^2 * factor_evap_kerr,
-# t_life_pl = M_pl_units^3/(3*alpha). El código traía alpha=1/3 (heredado de
-# Delta_t = t_pl*(M/M_pl_g)^3, que implícitamente fija 3*alpha=1) -> vida de un PBH de
-# 5e14 g de 6.54e14 s en vez de los ~4.35e17 s (edad del universo) que le corresponden por
-# definición (M* es, por convención estándar en la literatura de PBH, la masa que se estaría
-# evaporando hoy). alpha se calibra resolviendo t_life_pl(5e14 g) = edad_universo con la
-# física de evaporación pura (Fase 2, radiación estándar): alpha = t_pl_s*(M*/M_pl_g)^3 / (3*edad_universo_s).
-# Ver el reporte de P0-1 para cuánto se corre la M* efectiva una vez que se acopla con la
-# fase 1 de acreción (horizon-tracking, P0-4): esa fase mueve la masa de entrada a la fase 2
-# y por tanto corre un poco la M* observada hoy respecto a este valor calibrado en aislamiento.
-ALPHA_EVAP = 5.0077e-4
+# ---------------------------------------------------------------------------
+# alpha(M): evaporación de Hawking-Kerr, dependiente de la masa (Tarea 3)
+# ---------------------------------------------------------------------------
+# dM/dt = -alpha(M)/M^2 * factor_evap_kerr, con alpha = f(M)/(15360*pi) donde f(M) es el
+# número EFECTIVO de grados de libertad relativistas que el PBH radía a su temperatura de
+# Hawking T_H = 1/(8*pi*M) (unidades de Planck). Ver MacGibbon, PRD 44, 376 (1991) y
+# MacGibbon & Webber, PRD 41, 3052 (1990): un PBH sólo radía con multiplicidad plena las
+# especies cuya masa en reposo es menor que ~T_H; f(M) crece de ~2 (fotón+gravitón, PBHs
+# grandes y fríos) a ~106.75 (los g_* estándar del SM completo, PBHs de masa de Planck).
+#
+# HONESTIDAD: no tengo las tablas digitalizadas de MacGibbon (1991)/MacGibbon & Webber
+# (1990) — no hay acceso a internet en esta sesión para conseguirlas. f(M) de abajo es
+# una interpolación propia, monótona y por tramos, anclada en umbrales de masa en reposo
+# de las especies del SM estándar (vía T_H(M) = 1.0574e13/M_g GeV, ver cálculo en el
+# commit) y en dos valores que SÍ están dados/validados:
+#   - f=2 para M > 1e17 g (sólo fotón+gravitón — dato del prompt de la ronda 2).
+#   - f=106.75 para M ~ M_pl (g_* estándar del SM completo, cifra habitual en cosmología,
+#     no una invención).
+# El punto intermedio en M*=5e14 g (f=24.17) se ANCLA al alpha=5.0077e-4 ya validado en
+# la ronda 1 (P0-1): ese valor se obtuvo ahí calibrando contra la edad del universo, lo
+# cual —como se pide corregir en esta Tarea 3— es circular como DEFINICIÓN de alpha (mete
+# el umbral observacional dentro del parámetro físico). Aquí se usa como punto de anclaje
+# de la interpolación de f(M) y se PRESENTA la concordancia con M*~5e14 g como
+# verificación posterior, no como la definición de alpha. Si la precisión de f(M) importa
+# para el paper, hace falta digitalizar las tablas reales de MacGibbon — esto es una
+# aproximación de orden de magnitud, físicamente motivada pero no una reproducción exacta.
+#
+# T_H(M_g) = M_pl_GeV*M_pl_g/(8*pi*M_g) GeV. Anclas (M_g, f), masa descendente:
+#   1e22 g   f=2      T_H~1e-9 GeV, frío
+#   1e17 g   f=2      límite superior dado en el prompt
+#   5e14 g   f=24.17  ANCLA DE VALIDACIÓN (T_H~21 MeV; ronda 1, alpha=5.0077e-4)
+#   1e14 g   f=30     T_H~106 MeV, umbral del muon
+#   5e13 g   f=60     T_H~200 MeV, umbral de QCD (quarks+gluones se activan)
+#   6e12 g   f=80     T_H~1.8 GeV, umbral del tau
+#   1e11 g   f=100    T_H~106 GeV, umbral W/Z/top — casi todo el SM activo
+#   1 g      f=106.75 SM completo (g_* estándar)
+#   1e-5 g   f=106.75 se queda plano (escala de Planck, no hay más que añadir)
+_F_DOF_LOG10_M_ANCLAS = np.array([-5, 0, 11, 12.778, 13.699, 14, 14.699, 17, 22], dtype=np.float64)
+_F_DOF_ANCLAS = np.array([106.75, 106.75, 100.0, 80.0, 60.0, 30.0, 24.17, 2.0, 2.0], dtype=np.float64)
+
+
+def f_dof_of_mass_g(M_g):
+    """f(M): grados de libertad relativistas efectivos a T_H(M). Ver nota de honestidad
+    y anclas arriba. Funciona con jnp (Fase 1, trazado) y con float/np (Fase 2)."""
+    log10_M = jnp.log10(jnp.clip(M_g, 1e-30, None))
+    return jnp.interp(log10_M, _F_DOF_LOG10_M_ANCLAS, _F_DOF_ANCLAS)
+
+
+def alpha_of_mass_g(M_g):
+    """alpha(M) = f(M)/(15360*pi) (AUDIT.md ronda 1: 1 dof da 1/(15360*pi)=2.07e-5)."""
+    return f_dof_of_mass_g(M_g) / (15360.0 * jnp.pi)
+
+
+# Compatibilidad/lectura rápida: alpha en el ancla de validación M*=5e14 g (no se usa en
+# ningún cálculo — todo el código usa alpha_of_mass_g(M) evaluado en la M que corresponda).
+ALPHA_EVAP_EN_M_ESTRELLA = float(alpha_of_mass_g(jnp.asarray(5e14)))
 
 def put_M_array(Mass_min, Mass_max, num_points_low=7000, num_points_high=7000):
     Mass_cut = 1.0e5
@@ -206,8 +251,10 @@ def _precalcular_acreccion_lote_impl(Mi_val_g, N_fin, a_star, L_acc, regime, gam
         else:
             raise ValueError(f"regime debe ser 'wave' u 'horizon_tracking', no {regime!r}")
 
-        # 2. Evaporación de Hawking-Kerr
-        dM_dt_evap_pl = - (ALPHA_EVAP / jnp.maximum(M_actual**2.0, 1.0)) * factor_evap_kerr
+        # 2. Evaporación de Hawking-Kerr. alpha(M) (Tarea 3): más dof activos a masa
+        #    chica (T_H alta) que a masa grande (T_H baja) — ver alpha_of_mass_g arriba.
+        alpha_local = alpha_of_mass_g(M_actual * M_pl_g)
+        dM_dt_evap_pl = - (alpha_local / jnp.maximum(M_actual**2.0, 1.0)) * factor_evap_kerr
         dlnM_dN_evap = (dM_dt_evap_pl / H_val) / M_actual
 
         factor_apagado = 0.5 * (1.0 + jnp.tanh(u_safe * 3.0))
@@ -368,7 +415,7 @@ def diff_rad(ln_rho, initial, M, beta0):
     if ratio_M > 1e90:
         ratio_t = 0.0  
     else:
-        Delta_t = constants.t_pl * (ratio_M**3) / (3.0 * ALPHA_EVAP)
+        Delta_t = constants.t_pl * (ratio_M**3) / (3.0 * alpha_of_mass_g(M))
         ratio_t = time / Delta_t
 
     factor_evap = np.maximum(1.0 - ratio_t, 0.0)**(1.0 / 3.0)
@@ -381,7 +428,7 @@ def end_evol(ln_rho, initial, M, beta0):
     ratio_M = M / constants.M_pl_g
     if ratio_M > 1e90:
         return 1.0  
-    Delta_t = constants.t_pl * (ratio_M**3) / (3.0 * ALPHA_EVAP)
+    Delta_t = constants.t_pl * (ratio_M**3) / (3.0 * alpha_of_mass_g(M))
     d_time = initial[1]
     ratio_t = np.minimum(d_time / Delta_t, 1.0)
     Mass_end = M * (1.0 - ratio_t)**(1.0 / 3.0)
@@ -482,7 +529,7 @@ def Betas_DM(M_tot, omega):
                 if ratio_M > 1e90:
                     factor_evap_final = 1.0
                 else:
-                    Delta_t = constants.t_pl * (ratio_M**3) / (3.0 * ALPHA_EVAP)
+                    Delta_t = constants.t_pl * (ratio_M**3) / (3.0 * alpha_of_mass_g(M_i))
                     factor_evap_final = np.maximum(1.0 - sol_try.y[1][-1] / Delta_t, 0.0)**(1.0 / 3.0)
 
                 y_val = betas_tot[i] * sol_try.y[0][-1] * factor_evap_final
@@ -526,7 +573,7 @@ def Betas_BBN(M_tot, omega):
                                             t_eval=ln_den, args=(M_i, beta), method="DOP853")
                     y_val = beta * sol_try_rel.y[0][-1] * (constants.M_pl_g / M_i)
                 else:
-                    Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * ALPHA_EVAP)
+                    Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * alpha_of_mass_g(M_i))
                     y_val = beta * sol_try.y[0][-1] * (1. - sol_try.y[1][-1] / Delta_t)**(1./3)
             else:
                 y_val = constants.ev2
@@ -560,7 +607,7 @@ def Betas_SD(M_tot, omega):
                 sol_try = _solve_ivp_checked(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
                                     events=end_evol, t_eval=ln_den,
                                     args=(M_i, beta), method="DOP853")
-                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * ALPHA_EVAP)
+                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * alpha_of_mass_g(M_i))
                 if len(sol_try.t) > 0:
                     y_val = beta * sol_try.y[0][-1] * (1. - sol_try.y[1][-1] / Delta_t)**(1./3)
                 else:
@@ -596,7 +643,7 @@ def Betas_CMB_AN(M_tot, omega):
                 sol_try = _solve_ivp_checked(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
                                     events=end_evol, t_eval=ln_den,
                                     args=(M_i, beta), method="DOP853")
-                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * ALPHA_EVAP)
+                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * alpha_of_mass_g(M_i))
                 if len(sol_try.t) > 0:
                     y_val = beta * sol_try.y[0][-1] * (1. - sol_try.y[1][-1] / Delta_t)**(1./3)
                 else:
@@ -636,7 +683,7 @@ def Betas_GRB(M_tot, omega):
                 sol_try = _solve_ivp_checked(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
                                     events=end_evol, t_eval=ln_den,
                                     args=(M_i, beta), method="DOP853")
-                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * ALPHA_EVAP)
+                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * alpha_of_mass_g(M_i))
                 if len(sol_try.t) > 0:
                     y_val = beta * sol_try.y[0][-1] * (1. - sol_try.y[1][-1] / Delta_t)**(1./3)
                 else:
@@ -653,7 +700,7 @@ def Betas_GRB(M_tot, omega):
                 sol_try = _solve_ivp_checked(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
                                     events=end_evol, t_eval=ln_den,
                                     args=(M_i, beta), method="DOP853")
-                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * ALPHA_EVAP)
+                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * alpha_of_mass_g(M_i))
                 if len(sol_try.t) > 0:
                     y_val = beta * sol_try.y[0][-1] * (1. - sol_try.y[1][-1] / Delta_t)**(1./3)
                 else:
@@ -689,7 +736,7 @@ def Betas_Reio(M_tot, omega):
                 sol_try = _solve_ivp_checked(diff_rad, (ln_den_f, ln_den_end_), np.array([1., 0.]),
                                     events=end_evol, t_eval=ln_den,
                                     args=(M_i, beta), method="DOP853")
-                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * ALPHA_EVAP)
+                Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * alpha_of_mass_g(M_i))
                 if len(sol_try.t) > 0:
                     y_val = beta * sol_try.y[0][-1] * (1. - sol_try.y[1][-1] / Delta_t)**(1./3)
                 else:
@@ -729,7 +776,7 @@ def Betas_LSP(M_tot, w):
                                             t_eval=ln_den, args=(M_i, beta), method="DOP853")
                     y_val = beta * sol_try_rel.y[0][-1] * (constants.M_pl_g / M_i)
                 else:
-                    Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * ALPHA_EVAP)
+                    Delta_t = constants.t_pl * (M_i / constants.M_pl_g)**3 / (3.0 * alpha_of_mass_g(M_i))
                     y_val = beta * sol_try.y[0][-1] * (1. - sol_try.y[1][-1] / Delta_t)**(1./3)
 
         constraints.betas_LSP_tot.append(beta)
