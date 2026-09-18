@@ -22,12 +22,39 @@ H_end_GeV = 4.44e13
 H_end_pl  = H_end_GeV / M_pl_GeV
 n = 100.00
 
-# Modelo de acreción (paper, ec. 2.13+2.15 — AUDIT.md P0-4, Opción A):
-# dlnM/dN = min(3 L_eff x / 8pi, 3 gamma_H / 2x). Rama Michel (x* = 4pi/L_eff): INESTABLE.
-# Rama cap (x -> gamma_H): ESTABLE, horizon-tracking (M ~ M_H). Reemplaza el modelo
-# saturante 3*lambda*x*(1-x)*Omega_phi, que no depende de N_re y no es el del paper.
-L_ACC_DEFAULT = 102.0   # L del paper; L > 4*pi*GAMMA_H ~ 12.6 pone al PBH en horizon-tracking
+# ---------------------------------------------------------------------------
+# Modelo de acreción — dos regímenes (ver DERIVACION_ACRECION.md)
+# ---------------------------------------------------------------------------
+# regime='wave' (DEFAULT, ronda 2): el condensado oscilante es un CAMPO CLÁSICO
+# COHERENTE, no un fluido (Michel diverge a w->0, DERIVACION_ACRECION.md §1) ni un gas
+# de partículas sin colisiones (infall da mu=e^{DeltaN}, también enorme, §2b). Acretarlo
+# es un problema de absorción de ondas: Unruh (1976) da sigma_abs = A_H/v = 16 pi M^2/v
+# para un escalar masivo no relativista, y el v se cancela: Mdot = 16 pi M^2 rho, FINITO,
+# sin regulador ad hoc. dlnM/dN = 3*L_eff*x/(8*pi), sin min() y sin (1-x): x decae
+# monótonamente y nunca se acerca a 1 si L*gamma < 4*pi (ver GAMMA_COLAPSO más abajo).
+L_ACC_DEFAULT = 16.0 * np.pi   # = 50.265; Unruh 1976. Ver DERIVACION_ACRECION.md §2c.
+
+# regime='horizon_tracking': el modelo de la ronda 1 (AUDIT.md P0-4), literal de la
+# ec. (2.15) del paper: dlnM/dN = min(3 L_eff x/8pi, 3 gamma_H/2x). Es la solución
+# auto-similar de Zel'dovich-Novikov que Carr & Hawking (1974) argumentan que NO se
+# realiza (DERIVACION_ACRECION.md §1-2a): colapsa la función de masa a una delta en
+# gamma_H*M_H(N_re) — medido en la ronda 2 (mu idéntico a 5 cifras para M_i de 1e0 a
+# 1e16 g). Se conserva como resultado versionado (Tarea 4), NO es el default.
+L_ACC_HORIZON_TRACKING_DEFAULT = 102.0   # L del paper tal como se leyó en la ronda 1
 GAMMA_H = 1.0            # gamma^MD, convención PBHBeta (ver PBHBeta/BfM.py: "no bien conocido, se adopta 1")
+
+# GAMMA_COLAPSO: eficiencia de colapso en dominación de materia, x(N_form) = gamma. NO
+# es libre: la solución cerrada de regime='wave' (DERIVACION_ACRECION.md §3),
+#   mu = [1 - L*gamma/(4*pi)]^-1,
+# sólo es válida (y positiva) para L*gamma < 4*pi = 12.566 — más allá de eso el modelo
+# es tan runaway como horizon_tracking. gamma_reh=1 (la convención de PBHBeta, usada en
+# regime='horizon_tracking' y en BfM.py) da L*gamma=50 >> 4pi: INADMISIBLE para el
+# régimen de onda. El colapso en dominación de materia está limitado por anisotropía e
+# inhomogeneidad, no por un umbral de densidad, y da gamma << 1 (refs en
+# DERIVACION_ACRECION.md §6: Khlopov & Polnarev 1980; Jedamzik & Niemeyer 1999; Harada,
+# Yoo, Kohri, Nakao & Jhingan 2016; Carr, Dimopoulos, Owen & Tenkanen 2018). Con
+# L=16*pi y gamma=0.15, mu=2.5 (0.4 décadas) — el "shift pequeño" que predice §3.
+GAMMA_COLAPSO = 0.15
 
 # Suavizado del min() (AUDIT.md P1-6): jnp.minimum tiene un kink (derivada discontinua)
 # justo donde las dos ramas se cruzan. Con un solver explícito adaptativo (Tsit5) eso
@@ -83,12 +110,37 @@ def put_M_array(Mass_min, Mass_max, num_points_low=7000, num_points_high=7000):
 # ---------------------------------------------------------------------------
 # FASE 1: Acreción y Evaporación de Kerr
 # ---------------------------------------------------------------------------
+def _factor_espin_acc_np(a_star):
+    raiz_espin = np.sqrt(1.0 - np.clip(a_star, 0.0, 0.9999)**2.0)
+    return ((1.0 + raiz_espin) / 2.0)**2.0
+
+
+def assert_subcritical(L_acc, a_star=0.0, gamma_form=GAMMA_COLAPSO):
+    """Tarea 2 / DERIVACION_ACRECION.md §3: en regime='wave', L*gamma < 4*pi es condición
+    de existencia de la solución cerrada (mu=[1-L*gamma/4pi]^-1), no un ajuste fino. Por
+    encima, x nunca decae y el modelo es tan runaway como horizon_tracking. Usa
+    L_eff = L_acc*factor_espin_acc(a_star); S_onda y Omega_phi ~ 1 en el régimen de
+    interés (ver P2-13, resumen ronda 1), así que no hace falta traerlos aquí."""
+    L_eff = L_acc * _factor_espin_acc_np(a_star)
+    limite = 4.0 * np.pi
+    producto = L_eff * gamma_form
+    if not (producto < limite):
+        raise AssertionError(
+            f"regime='wave' en runaway: L_eff*gamma = {producto:.4f} >= 4*pi = "
+            f"{limite:.4f} (L_acc={L_acc}, a_star={a_star}, gamma={gamma_form}). "
+            f"Baja L_acc o gamma_form — ver DERIVACION_ACRECION.md §3."
+        )
+
+
 @eqx.filter_jit
-@functools.partial(jax.vmap, in_axes=(0, None, None, None))
-def precalcular_acreccion_lote(Mi_val_g, N_fin, a_star, L_acc=L_ACC_DEFAULT):
+@functools.partial(jax.vmap, in_axes=(0, None, None, None, None, None))
+def _precalcular_acreccion_lote_impl(Mi_val_g, N_fin, a_star, L_acc, regime, gamma_form):
     M_i_pl = Mi_val_g / M_pl_g
     M_end_pl = 1.0 / H_end_pl
-    N_ini = (2.0 / 3.0) * jnp.log(jnp.maximum(M_i_pl / M_end_pl, 1.0)) 
+    # x(N_form) = gamma_form (Tarea 2): M_i = gamma_form * M_H(N_ini). Con gamma_form=1
+    # (regime='horizon_tracking') es la definición original de la ronda 1 (M_i=M_H(N_ini)
+    # exacto, x=1).
+    N_ini = (2.0 / 3.0) * jnp.log(jnp.maximum(M_i_pl / (gamma_form * M_end_pl), 1.0))
     a_star_safe = jnp.clip(a_star, 0.0, 0.9999)
 
     # Definición de la masa del campo escalar (Inflatón)
@@ -132,16 +184,27 @@ def precalcular_acreccion_lote(Mi_val_g, N_fin, a_star, L_acc=L_ACC_DEFAULT):
         z = 2.0 * M_actual * mu_pl
         S_onda = (z**2.0) / (1.0 + z**2.0)
         
-        # 1. Tasa de acreción tipo Michel/Bondi con cap de horizon-tracking (ver constantes
-        #    L_ACC_DEFAULT / GAMMA_H arriba y AUDIT.md P0-4).
+        # 1. Tasa de acreción. L_eff modulado por espín/onda/campo escalar en ambos
+        #    regímenes (ver DERIVACION_ACRECION.md y factor_espin_acc/S_onda arriba).
         L_eff = L_acc * factor_espin_acc * S_onda * Omega_phi
-        dlnM_dN_michel = 3.0 * L_eff * x / (8.0 * jnp.pi)
-        dlnM_dN_cap = 3.0 * GAMMA_H / (2.0 * jnp.maximum(x, 1e-12))
-        # min suave (ver EPS_SOFTMIN arriba): evita el kink de jnp.minimum que
-        # colapsaba el paso del integrador cerca del punto fijo inestable x*.
-        dlnM_dN_acc = 0.5 * (dlnM_dN_michel + dlnM_dN_cap) - 0.5 * jnp.sqrt(
-            (dlnM_dN_michel - dlnM_dN_cap)**2 + EPS_SOFTMIN**2
-        )
+        if regime == "wave":
+            # Tarea 1 / DERIVACION_ACRECION.md §2c, §3: absorción de onda (Unruh 1976).
+            # Sin min() y sin (1-x) — no hace falta regulador: si L*gamma<4*pi (ver
+            # assert_subcritical), x decae monótonamente y nunca se acerca a 1.
+            dlnM_dN_acc = 3.0 * L_eff * x / (8.0 * jnp.pi)
+        elif regime == "horizon_tracking":
+            # Tarea 4 / AUDIT.md P0-4 (ronda 1): min(Michel, cap), preservado como
+            # resultado versionado, no como default — ver DERIVACION_ACRECION.md §1-2a
+            # sobre por qué se descartó como modelo central.
+            dlnM_dN_michel = 3.0 * L_eff * x / (8.0 * jnp.pi)
+            dlnM_dN_cap = 3.0 * GAMMA_H / (2.0 * jnp.maximum(x, 1e-12))
+            # min suave (ver EPS_SOFTMIN arriba): evita el kink de jnp.minimum que
+            # colapsaba el paso del integrador cerca del punto fijo inestable x*.
+            dlnM_dN_acc = 0.5 * (dlnM_dN_michel + dlnM_dN_cap) - 0.5 * jnp.sqrt(
+                (dlnM_dN_michel - dlnM_dN_cap)**2 + EPS_SOFTMIN**2
+            )
+        else:
+            raise ValueError(f"regime debe ser 'wave' u 'horizon_tracking', no {regime!r}")
 
         # 2. Evaporación de Hawking-Kerr
         dM_dt_evap_pl = - (ALPHA_EVAP / jnp.maximum(M_actual**2.0, 1.0)) * factor_evap_kerr
@@ -196,11 +259,41 @@ def precalcular_acreccion_lote(Mi_val_g, N_fin, a_star, L_acc=L_ACC_DEFAULT):
         
     M_final_pl = lax.cond(N_ini < N_fin, integrar, lambda _: M_i_pl, operand=None)
     M_final_g = M_final_pl * M_pl_g
-    
+
     return M_final_g, M_final_g / Mi_val_g
 
+
+def precalcular_acreccion_lote(Mi_val_g, N_fin, a_star, L_acc=None, regime="wave",
+                                gamma_form=GAMMA_COLAPSO):
+    """Fase 1 (acreción + evaporación de Kerr). Tarea 1/2/4:
+
+    regime='wave' (default): Unruh 1976, dlnM/dN=3*L_eff*x/8pi, x(N_form)=gamma_form.
+        Requiere L_acc*factor_espin_acc(a_star)*gamma_form < 4*pi (assert_subcritical,
+        se corre antes de integrar). Ver DERIVACION_ACRECION.md.
+    regime='horizon_tracking': modelo de la ronda 1 (AUDIT.md P0-4), min(Michel,cap),
+        x(N_form)=1 siempre (gamma_form se ignora). Preservado como resultado
+        versionado — ver DERIVACION_ACRECION.md §1-2a sobre por qué no es el default.
+
+    L_acc=None usa L_ACC_DEFAULT (wave) o L_ACC_HORIZON_TRACKING_DEFAULT
+    (horizon_tracking) según el régimen.
+    """
+    if regime not in ("wave", "horizon_tracking"):
+        raise ValueError(f"regime debe ser 'wave' u 'horizon_tracking', no {regime!r}")
+    if L_acc is None:
+        L_acc = L_ACC_DEFAULT if regime == "wave" else L_ACC_HORIZON_TRACKING_DEFAULT
+    gamma_eff = gamma_form if regime == "wave" else 1.0
+    if regime == "wave":
+        try:
+            a_star_scalar = float(a_star)
+        except TypeError:
+            a_star_scalar = None  # a_star traced (p.ej. dentro de otro jit); no se puede
+                                    # chequear en Python de antemano, se deja pasar.
+        if a_star_scalar is not None:
+            assert_subcritical(float(L_acc), a_star=a_star_scalar, gamma_form=gamma_eff)
+    return _precalcular_acreccion_lote_impl(Mi_val_g, N_fin, a_star, L_acc, regime, gamma_eff)
+
 # ---------------------------------------------------------------------------
-# Corrimiento de restricciones 
+# Corrimiento de restricciones
 # ---------------------------------------------------------------------------
 
 def aplicar_corrimiento_acrecion(M_tot, M_f_tot, betas_sbb_full):
