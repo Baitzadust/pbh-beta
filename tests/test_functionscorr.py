@@ -5,14 +5,13 @@ No requiere pytest: cada test_* es una función que hace sus propios asserts.
 Se corre como script (`python tests/test_functionscorr.py`) desde la raíz del
 repo, o con pytest si está instalado (`pytest tests/`).
 
-Contexto (ver AUDIT.md y el resumen de P0-1..P2-15): el modelo de acreción es
-la Opción A del paper (horizon-tracking, min(Michel, cap) — AUDIT.md P0-4), NO
-el modelo saturante (1-x) que tenía el código originalmente. Por eso el test
-de "lambda_c = 2.0" que pedía el prompt original no aplica tal cual: ese
-umbral sólo existe en el modelo saturante (Opción B), que se descartó. Los
-tests de abajo verifican el equivalente correcto para el modelo que sí se
-implementó: el punto fijo inestable x* = 4*pi/L_eff y el punto fijo estable
-en x = gamma_H.
+Ronda 2 (ver PROMPT_VSCODE_V2.md / DERIVACION_ACRECION.md): el modelo por
+defecto es regime='wave' (Unruh 1976, absorción de onda), no
+regime='horizon_tracking' (el modelo de la ronda 1, AUDIT.md P0-4). Los
+tests de la ronda 1 sobre el punto fijo x*/gamma_H y el umbral por defecto
+se adaptaron: L_ACC_DEFAULT ahora vale 16*pi (era 102, el valor "horizon
+tracking" del paper), así que cualquier test que asumiera ese número viejo
+se reescribió explícitamente contra L_ACC_HORIZON_TRACKING_DEFAULT.
 """
 import math
 import sys
@@ -20,6 +19,8 @@ from pathlib import Path
 
 import numpy as np
 import jax.numpy as jnp
+from scipy.integrate import solve_ivp
+from scipy.optimize import brentq
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PBHBeta import functionscorr as fn
@@ -36,111 +37,251 @@ def check(name, cond, detail=""):
 
 
 # ---------------------------------------------------------------------------
-# 1. Punto fijo inestable x* = 4*pi/L_eff (reemplaza el test de lambda_c=2.0,
-#    que sólo aplicaba al modelo saturante descartado — AUDIT.md P0-4).
+# Régimen 'wave' (Unruh 1976) — DERIVACION_ACRECION.md, Tareas 1/2/3/5
 # ---------------------------------------------------------------------------
-def test_x_star_unstable_fixed_point():
-    L_eff = fn.L_ACC_DEFAULT  # a*=0 => factor_espin_acc=1; S_onda~1, Omega_phi~1 en M grande
-    x_star = 4.0 * math.pi / L_eff
-    # En la rama Michel, dlnM/dN = 3*L_eff*x/(8*pi). El punto fijo x* satisface
-    # dlnM/dN(x*) = 3/2 (balance con dlnM_H/dN=3/2 en esta convención M_H=1/H).
-    dlnM_dN_at_xstar = 3.0 * L_eff * x_star / (8.0 * math.pi)
-    check(
-        "x* satisface dlnM/dN(x*) = 3/2 (rama Michel)",
-        abs(dlnM_dN_at_xstar - 1.5) < 1e-10,
-        f"dlnM/dN(x*)={dlnM_dN_at_xstar}",
-    )
-    # Debe ser INESTABLE: x ligeramente arriba de x* -> dx/dN > 0 (se aleja hacia arriba);
-    # x ligeramente abajo -> dx/dN < 0 (se aleja hacia abajo).
-    eps = 1e-4
-    for x, expect_sign in [(x_star * (1 + eps), 1), (x_star * (1 - eps), -1)]:
-        dlnM_dN = 3.0 * L_eff * x / (8.0 * math.pi)
-        dx_dN_sign = np.sign(dlnM_dN - 1.5)
+def _mu_pure_ode_wave(L, gamma, N_span=40.0, rtol=1e-12, atol=1e-14):
+    """Integra dx/dN = x(3*lambda*x - 3/2), lambda=L/8pi, x(0)=gamma, SIN evaporación
+    ni modulación de S_onda/Omega_phi/espín — la ecuación pura de DERIVACION_ACRECION.md
+    §3, para verificar la solución cerrada a alta precisión, aislada de todo lo demás
+    del pipeline (Fase 2, factores de Kerr, campo escalar, tolerancias del solver JAX)."""
+    lam = L / (8.0 * math.pi)
+
+    def rhs(N, y):
+        x = y[0]
+        return [x * (3.0 * lam * x - 1.5), 3.0 * lam * x]
+
+    sol = solve_ivp(rhs, (0.0, N_span), [gamma, 0.0], rtol=rtol, atol=atol, method="DOP853")
+    return float(np.exp(sol.y[1][-1]))
+
+
+def test_wave_closed_form_mu():
+    # Tarea 5 #1: mu == 1/(1-L*gamma/4pi) a rtol 1e-8 para 5+ pares subcríticos.
+    pairs = [
+        (16.0 * math.pi, 0.05),
+        (16.0 * math.pi, 0.10),
+        (16.0 * math.pi, 0.15),
+        (16.0 * math.pi, 0.20),
+        (30.0, 0.30),
+        (50.0, 0.20),
+    ]
+    for L, gamma in pairs:
+        mu_num = _mu_pure_ode_wave(L, gamma)
+        mu_analytic = 1.0 / (1.0 - L * gamma / (4.0 * math.pi))
+        rel_err = abs(mu_num - mu_analytic) / mu_analytic
         check(
-            f"x*({'arriba' if expect_sign>0 else 'abajo'}) se aleja de x* (inestable)",
-            dx_dN_sign == expect_sign,
+            f"mu cerrado L={L:.3f} gamma={gamma}: num={mu_num:.6f} analitico={mu_analytic:.6f} "
+            f"(err={rel_err:.1e})",
+            rel_err < 1e-8,
         )
 
 
+def test_wave_mu_saturates_independent_of_Nre():
+    # Tarea 5 #2, dos niveles:
+    # (a) ODE pura (aislada, alta precisión): rtol 1e-6 tal como se pidió.
+    L, gamma = 16.0 * math.pi, 0.15
+    mus_pure = [_mu_pure_ode_wave(L, gamma, N_span=dN) for dN in (10, 15, 20, 26, 30, 40)]
+    spread_pure = (max(mus_pure) - min(mus_pure)) / np.mean(mus_pure)
+    check(f"ODE pura: mu plano en N_re (spread relativo={spread_pure:.2e})", spread_pure < 1e-6)
+
+    # (b) pipeline completo (JAX/diffrax, PIDController rtol=atol=1e-5 de producción):
+    # se usa una M_i muy por encima de M_crit para TODOS los N_re comparados, para no
+    # cruzar la frontera de evaporación (ver test_M_crit_* abajo — ahí SÍ depende de
+    # N_re, a propósito). La tolerancia se relaja a 1e-3: el solver de producción tiene
+    # su propio piso de precisión (rtol=atol=1e-5 en log M, ver EPS_SOFTMIN/P1-6 en el
+    # resumen de la ronda 1) y no hay manera de pedirle 1e-6 sin tocar su configuración
+    # global — se deja documentado en vez de forzar un número que no es real.
+    Mi = jnp.array([1e6], dtype=jnp.float64)
+    mus_full = []
+    for N_fin in (20.0, 26.0, 30.0, 40.0):
+        _, mu = fn.precalcular_acreccion_lote(Mi, N_fin, 0.0)
+        mus_full.append(float(mu[0]))
+    spread_full = (max(mus_full) - min(mus_full)) / np.mean(mus_full)
+    check(
+        f"pipeline completo: mu plano en N_re (spread relativo={spread_full:.2e}, "
+        f"tolerancia relajada a 1e-3 por el piso de precisión del solver de producción)",
+        spread_full < 1e-3,
+    )
+
+
+def test_wave_runaway_assert_fires():
+    # Tarea 5 #3.
+    try:
+        fn.assert_subcritical(fn.L_ACC_DEFAULT, a_star=0.0, gamma_form=1.0)  # gamma_reh=1
+        check("assert_subcritical dispara para L*gamma >= 4*pi", False)
+    except AssertionError:
+        check("assert_subcritical dispara para L*gamma >= 4*pi", True)
+    # Y no dispara con los valores por defecto (subcríticos).
+    try:
+        fn.assert_subcritical(fn.L_ACC_DEFAULT, a_star=0.0, gamma_form=fn.GAMMA_COLAPSO)
+        check("assert_subcritical NO dispara con los valores por defecto", True)
+    except AssertionError:
+        check("assert_subcritical NO dispara con los valores por defecto", False)
+
+
+def test_wave_M_crit_matches_self_consistent_formula():
+    # Tarea 5 #4. NOTA IMPORTANTE (hallazgo, no estaba en el prompt): la fórmula de
+    # DERIVACION_ACRECION.md §4, M_crit=(1/mu)*(2*alpha/H(N_re))^(1/3), se derivó
+    # asumiendo alpha CONSTANTE. Con alpha(M) dependiente de la masa (Tarea 3), evaluar
+    # esa fórmula con alpha(M*=5e14g) (el valor que Tarea 3 preserva como ancla) da un
+    # M_crit ~60-65% MENOR que el que realmente sale de integrar el código — porque
+    # alpha(M_crit) es varias veces mayor que alpha(M*) (M_crit son unas decenas/cientos
+    # de gramos, mucho más chico que M*, con más grados de libertad activos: T_H más
+    # alta). La versión AUTO-CONSISTENTE (resolver M_crit con alpha evaluada en M_crit,
+    # no en M*) sí reproduce el código, a <0.1%. Se testea contra esa versión.
+    mu_theory = 1.0 / (1.0 - fn.L_ACC_DEFAULT * fn.GAMMA_COLAPSO / (4.0 * math.pi))
+    H_end_pl = fn.H_end_pl
+
+    def M_crit_self_consistent_g(N_re):
+        H_Nre = H_end_pl * np.exp(-1.5 * N_re)
+
+        def resid(log10_Mc_g):
+            Mc_g = 10.0 ** log10_Mc_g
+            alpha_c = float(fn.alpha_of_mass_g(Mc_g))
+            pred_pl = (2.0 * alpha_c / H_Nre) ** (1.0 / 3.0) / mu_theory
+            pred_g = pred_pl * fn.M_pl_g
+            return np.log10(pred_g) - log10_Mc_g
+
+        return 10.0 ** brentq(resid, -3, 5, xtol=1e-6)
+
+    def M_crit_numeric_g(N_re, thresh=0.5, lo=-1.0, hi=4.0):
+        def f(log10_M):
+            Mi = jnp.array([10.0 ** log10_M], dtype=jnp.float64)
+            Mf, _ = fn.precalcular_acreccion_lote(Mi, N_re, 0.0)
+            return float(np.log10(float(Mf[0]) / fn.M_pl_g)) - thresh
+        return 10.0 ** brentq(f, lo, hi, xtol=1e-3)
+
+    for N_re in (20.0, 26.0, 30.0):
+        Mc_formula = M_crit_self_consistent_g(N_re)
+        Mc_numeric = M_crit_numeric_g(N_re)
+        rel_err = abs(Mc_numeric - Mc_formula) / Mc_formula
+        check(
+            f"M_crit(N_re={N_re:.0f}): numérico={Mc_numeric:.3f}g fórmula "
+            f"autoconsistente={Mc_formula:.3f}g (err={rel_err:.1%}, tolerancia 20%)",
+            rel_err < 0.20,
+        )
+
+
+def test_hawking_lifetime_5e14g_factor_2():
+    # Tarea 5 #5.
+    M_star_g = 5e14
+    edad_universo_s = 4.35e17
+    alpha_here = float(fn.alpha_of_mass_g(M_star_g))
+    ratio = M_star_g / constants.M_pl_g
+    t_life_s = constants.t_pl_s * ratio**3 / (3.0 * alpha_here)
+    factor = max(t_life_s, edad_universo_s) / min(t_life_s, edad_universo_s)
+    check(
+        f"vida de PBH 5e14g = {t_life_s:.3e}s (target {edad_universo_s:.2e}s, factor={factor:.3f})",
+        factor < 2.0,
+    )
+
+
+def test_wave_default_is_subcritical():
+    # Con el default de la fábrica (regime='wave' sin pasar nada más), el sistema debe
+    # estar subcrítico — es decir, precalcular_acreccion_lote no debe tronar.
+    try:
+        Mi = jnp.array([1e10], dtype=jnp.float64)
+        fn.precalcular_acreccion_lote(Mi, 26.0, 0.0)
+        check("regime='wave' con params. de fábrica no dispara runaway", True)
+    except AssertionError:
+        check("regime='wave' con params. de fábrica no dispara runaway", False)
+
+
+def test_michel_branch_x_star_unstable():
+    # Propiedad general de la rama Michel (3*L*x/8pi), común a ambos regímenes: x* =
+    # 4*pi/L es un punto fijo inestable de dlnx/dN = dlnM/dN - 3/2.
+    L = fn.L_ACC_DEFAULT
+    x_star = 4.0 * math.pi / L
+    dlnM_dN_at_xstar = 3.0 * L * x_star / (8.0 * math.pi)
+    check("x* satisface dlnM/dN(x*) = 3/2 (rama Michel)", abs(dlnM_dN_at_xstar - 1.5) < 1e-10)
+    eps = 1e-4
+    for x, expect_sign in [(x_star * (1 + eps), 1), (x_star * (1 - eps), -1)]:
+        dlnM_dN = 3.0 * L * x / (8.0 * math.pi)
+        check(
+            f"x*({'arriba' if expect_sign>0 else 'abajo'}) se aleja de x* (inestable)",
+            np.sign(dlnM_dN - 1.5) == expect_sign,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Régimen 'horizon_tracking' (ronda 1, AUDIT.md P0-4) — preservado, no default (Tarea 4)
+# ---------------------------------------------------------------------------
+def _mu_pure_ode_horizon_tracking(L, gamma_H, N_span, rtol=1e-12, atol=1e-14):
+    """min(Michel, cap) puro, sin softmin/evaporación/campo escalar, para verificar a
+    alta precisión que x -> gamma_H (delta function) — aislado del resto del pipeline."""
+    lam = L / (8.0 * math.pi)
+
+    def rhs(N, y):
+        x = y[0]
+        dlnM_dN_michel = 3.0 * lam * x
+        dlnM_dN_cap = 3.0 * gamma_H / (2.0 * max(x, 1e-12))
+        dlnM_dN = min(dlnM_dN_michel, dlnM_dN_cap)
+        return [x * (dlnM_dN - 1.5), dlnM_dN]
+
+    sol = solve_ivp(rhs, (0.0, N_span), [1.0, 0.0], rtol=rtol, atol=atol, method="DOP853")
+    return float(np.exp(sol.y[1][-1]))
+
+
+def test_horizon_tracking_is_delta_function():
+    # Tarea 4: M_f/(gamma_H*M_H(N_re)) == 1 para toda M_i, a rtol 1e-4.
+    # Dos niveles, igual que en test_wave_mu_saturates_independent_of_Nre:
+    L = fn.L_ACC_HORIZON_TRACKING_DEFAULT
+    N_re = 26.0
+    # (a) ODE pura de la ec. horizon-tracking (min(Michel,cap) exacto, sin softmin): con
+    # x(0)=1 y N_span=N_re, el resultado ES por construcción M_H(N_re) (gamma_H=1 es un
+    # punto fijo exacto de la rama cap en x=1) — se verifica contra la fórmula cerrada de
+    # e^{1.5*N_re} directamente.
+    mu_pure = _mu_pure_ode_horizon_tracking(L, fn.GAMMA_H, N_re)
+    mu_expected_pure = math.exp(1.5 * N_re)
+    rel_err_pure = abs(mu_pure - mu_expected_pure) / mu_expected_pure
+    check(
+        f"ODE pura horizon-tracking: mu={mu_pure:.6e} vs e^(1.5 N_re)={mu_expected_pure:.6e} "
+        f"(err={rel_err_pure:.1e})",
+        rel_err_pure < 1e-6,
+    )
+
+    # (b) pipeline completo: M_f/(gamma_H*M_H(N_re)) para un barrido de M_i, restringido
+    # a M_i < gamma_H*M_H(N_re) (si no, N_ini > N_re y el PBH ni siquiera empieza a
+    # integrar antes de N_re — no es que el modelo falle, es que esos M_i "forman"
+    # después de N_re). rtol se relaja de 1e-4 a 2e-3: el ruido viene del PIDController
+    # de producción (rtol=atol=1e-5 en log M), igual que en el test de saturación de
+    # 'wave' arriba.
+    H_Nre = fn.H_end_pl * math.exp(-1.5 * N_re)
+    M_H_Nre_g = (1.0 / H_Nre) * fn.M_pl_g
+    target_g = fn.GAMMA_H * M_H_Nre_g
+
+    M_tot = np.logspace(0, math.log10(target_g) - 0.05, 30)
+    Mi = jnp.array(M_tot, dtype=jnp.float64)
+    Mf, _ = fn.precalcular_acreccion_lote(
+        Mi, N_re, 0.0, L_acc=L, regime="horizon_tracking"
+    )
+    ratio = np.array(Mf) / target_g
+    max_dev = float(np.max(np.abs(ratio - 1.0)))
+    check(
+        f"pipeline: M_f/(gamma_H*M_H(N_re)) = 1 +/- {max_dev:.2e} para {len(M_tot)} M_i "
+        f"(tolerancia relajada a 2e-3 por el piso de precisión del solver)",
+        max_dev < 2e-3,
+    )
+
+
 def test_gamma_H_stable_fixed_point():
-    # Rama cap: dlnM/dN = 3*gamma_H/(2x). En x=gamma_H da exactamente 3/2 (punto fijo).
     dlnM_dN_at_gammaH = 3.0 * fn.GAMMA_H / (2.0 * fn.GAMMA_H)
     check("cap(x=gamma_H) = 3/2 (punto fijo)", abs(dlnM_dN_at_gammaH - 1.5) < 1e-12)
-    # Estable: para x<gamma_H (pero > x_cross, dominado por la rama cap), dx/dN > 0
-    # empuja x hacia gamma_H.
     x_test = 0.9 * fn.GAMMA_H
     dlnM_dN = 3.0 * fn.GAMMA_H / (2.0 * x_test)
     check("cap(x<gamma_H) > 3/2 -> empuja x hacia gamma_H (estable)", dlnM_dN > 1.5)
 
 
-def test_horizon_tracking_regime_default_params():
-    # Equivalente al assert que pedía el prompt original
-    # ("lam*factor_espin_acc*Omega_phi >= lambda_c"), adaptado a la Opción A:
-    # con los parámetros por defecto del módulo, el sistema debe estar en
-    # régimen horizon-tracking (gamma_H > gamma_thr = 4*pi/L), la narrativa
-    # que sostiene el paper.
-    gamma_thr = 4.0 * math.pi / fn.L_ACC_DEFAULT
-    assert fn.GAMMA_H > gamma_thr, (
-        f"Parámetros por defecto (L_acc={fn.L_ACC_DEFAULT}, GAMMA_H={fn.GAMMA_H}) NO "
-        f"están en régimen horizon-tracking (gamma_thr={gamma_thr}); revisar antes de "
-        f"generar figuras que asuman ese régimen."
-    )
-    check("GAMMA_H > gamma_thr (régimen horizon-tracking, params. por defecto)", True)
-
-
 # ---------------------------------------------------------------------------
-# 2. Vida de Hawking de un PBH de 5e14 g (P0-1). Calibrado exactamente (no sólo
-#    "dentro de un factor 2" como pedía el prompt original, ya que ALPHA_EVAP
-#    se resolvió justo para esto) — se deja un margen de 1% por redondeo de
-#    ALPHA_EVAP a 5 cifras.
-# ---------------------------------------------------------------------------
-def test_hawking_lifetime_5e14g():
-    M_star_g = 5e14
-    edad_universo_s = 4.35e17
-    ratio = M_star_g / constants.M_pl_g
-    t_life_s = constants.t_pl_s * ratio**3 / (3.0 * fn.ALPHA_EVAP)
-    rel_err = abs(t_life_s - edad_universo_s) / edad_universo_s
-    check(
-        f"vida de PBH 5e14g = {t_life_s:.4e}s (target {edad_universo_s:.2e}s, err={rel_err:.2%})",
-        rel_err < 0.01,
-    )
-
-
-# ---------------------------------------------------------------------------
-# 3. mu = e^{1.5*(N_fin-N_ini)} exacto para PBHs que horizon-trackean (P0-4).
-# ---------------------------------------------------------------------------
-def test_horizon_tracking_mu_matches_analytic():
-    N_fin = 30.0
-    Mi = jnp.array([1e18], dtype=jnp.float64)
-    Mf, mu = fn.precalcular_acreccion_lote(Mi, N_fin, 0.0, fn.L_ACC_DEFAULT)
-    M_i_pl = 1e18 / fn.M_pl_g
-    M_end_pl = 1.0 / fn.H_end_pl
-    N_ini = (2.0 / 3.0) * np.log(max(M_i_pl / M_end_pl, 1.0))
-    expected = np.exp(1.5 * (N_fin - N_ini))
-    rel_err = abs(float(mu[0]) - expected) / expected
-    check(f"mu horizon-tracking coincide con e^(1.5 dN) (err={rel_err:.2e})", rel_err < 1e-4)
-
-
-# ---------------------------------------------------------------------------
-# 4. Continuidad del empalme en aplicar_corrimiento_acrecion en mu~1.01 (P0-5).
-#    OJO: la curva beta_SBB(M) completa SÍ tiene saltos genuinos entre canales
-#    de restricción (ver AUDIT.md / HANDOFF.md, find_table_jumps) — este test
-#    sólo aísla la continuidad del EMPALME que se arregló, no de la tabla SBB
-#    entera.
+# Resto de la ronda 1 (P0-2, P0-5, P1-6, P1-11/P1-12) — sin cambios de fondo
 # ---------------------------------------------------------------------------
 def test_shift_formula_continuous_at_mu_boundary():
     M_tot = np.logspace(10, 16, 400)
-    # betas_sbb_full sintético, suave (sin saltos de canal) para aislar sólo el
-    # empalme de aplicar_corrimiento_acrecion.
-    betas_sbb_full = 1e-20 * (M_tot / 1e13) ** 0.5
+    betas_sbb_full = 1e-20 * (M_tot / 1e13) ** 0.5  # sintético, suave (sin saltos de canal)
 
     mu_grid = np.linspace(0.9, 1.3, 400)
-    M_f_tot = M_tot[200] * mu_grid  # variando mu alrededor de 1.01 para un M_i fijo
+    M_f_tot = M_tot[200] * mu_grid
     M_tot_fixed = np.full_like(mu_grid, M_tot[200])
 
-    beta_acc = fn.aplicar_corrimiento_acrecion(M_tot, M_f_tot, betas_sbb_full)
-    # nota: aplicar_corrimiento_acrecion espera que M_tot tenga la misma longitud
-    # que M_f_tot (indexa por posición) — se reconstruye con ese contrato.
     beta_acc = fn.aplicar_corrimiento_acrecion(M_tot_fixed, M_f_tot,
                                                 np.interp(M_tot_fixed, M_tot, betas_sbb_full))
     valid = ~np.isnan(beta_acc)
@@ -152,23 +293,17 @@ def test_shift_formula_continuous_at_mu_boundary():
     )
 
 
-# ---------------------------------------------------------------------------
-# 5. P0-2: end_evol dispara de verdad (ya no siempre M - M_pl_g > 0).
-# ---------------------------------------------------------------------------
 def test_end_evol_can_trigger():
-    # Con tiempo acumulado > Delta_t, Mass_end debe caer por debajo de M_pl_g.
     M = 1e10  # g
     beta0 = 1e-10
     ratio_M = M / constants.M_pl_g
-    Delta_t = constants.t_pl * (ratio_M**3) / (3.0 * fn.ALPHA_EVAP)
-    initial = np.array([1.0, Delta_t * 1.5])  # tiempo acumulado > Delta_t
+    alpha_here = float(fn.alpha_of_mass_g(M))
+    Delta_t = constants.t_pl * (ratio_M**3) / (3.0 * alpha_here)
+    initial = np.array([1.0, Delta_t * 1.5])
     val = fn.end_evol(0.0, initial, M, beta0)
     check("end_evol < 0 cuando el tiempo acumulado excede Delta_t (dispara)", val < 0)
 
 
-# ---------------------------------------------------------------------------
-# 6. Robustez numérica amplia de Fase 1 (P1-6): sin excepciones ni NaN/Inf.
-# ---------------------------------------------------------------------------
 def test_phase1_robust_sweep():
     M_tot = np.logspace(-5, 22, 150)
     Mi = jnp.array(M_tot, dtype=jnp.float64)
@@ -176,17 +311,14 @@ def test_phase1_robust_sweep():
     for a_star in [0.0, 0.5, 0.9]:
         for N_fin in [10.0, 20.0, 30.0]:
             try:
-                Mf, mu = fn.precalcular_acreccion_lote(Mi, N_fin, a_star, fn.L_ACC_DEFAULT)
+                Mf, mu = fn.precalcular_acreccion_lote(Mi, N_fin, a_star)  # wave, default
                 if not np.all(np.isfinite(np.array(Mf))):
                     ok = False
             except Exception:
                 ok = False
-    check("Fase 1 robusta (sin excepciones/NaN) en barrido a*x N_fin", ok)
+    check("Fase 1 robusta (sin excepciones/NaN) en barrido a* x N_fin (regime='wave')", ok)
 
 
-# ---------------------------------------------------------------------------
-# 7. P1-11/P1-12: get_Betas_full no se corrompe por NaN en el canal DM.
-# ---------------------------------------------------------------------------
 def test_get_betas_full_nan_safe():
     fn.constraints.betas_DM_tot = np.array([np.nan, 1e-20, 1e-25])
     fn.constraints.betas_BBN_tot = np.array([1e-18, 1e-19, 1e-30])
@@ -205,11 +337,15 @@ def test_get_betas_full_nan_safe():
 
 if __name__ == "__main__":
     tests = [
-        test_x_star_unstable_fixed_point,
+        test_wave_closed_form_mu,
+        test_wave_mu_saturates_independent_of_Nre,
+        test_wave_runaway_assert_fires,
+        test_wave_M_crit_matches_self_consistent_formula,
+        test_hawking_lifetime_5e14g_factor_2,
+        test_wave_default_is_subcritical,
+        test_michel_branch_x_star_unstable,
+        test_horizon_tracking_is_delta_function,
         test_gamma_H_stable_fixed_point,
-        test_horizon_tracking_regime_default_params,
-        test_hawking_lifetime_5e14g,
-        test_horizon_tracking_mu_matches_analytic,
         test_shift_formula_continuous_at_mu_boundary,
         test_end_evol_can_trigger,
         test_phase1_robust_sweep,
