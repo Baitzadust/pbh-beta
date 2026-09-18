@@ -293,6 +293,27 @@ def test_shift_formula_continuous_at_mu_boundary():
     )
 
 
+def test_relic_floor_does_not_use_shift_formula():
+    # Ronda 3, Tarea 3: bug real encontrado en aplicar_corrimiento_acrecion. Cuando un
+    # PBH se evapora del todo (M_f queda fijo en M_pl_g, mu ~ 0), M_pl_g casi siempre cae
+    # DENTRO del rango tabulado de M_tot -> log_bf[i] es válido -> la fórmula de
+    # corrimiento beta_SBB(M_f)/mu se evaluaba con un mu casi nulo en el denominador,
+    # dando un número arbitrario en vez de beta_SBB(M_i) (la reliquia depende de la
+    # densidad NUMÉRICA de formación, no del corrimiento de masa). Este test construye el
+    # caso exacto (M_f == M_pl_g, M_i grande) y verifica que beta_acc == beta_SBB(M_i), no
+    # el resultado (erróneo) de dividir entre un mu diminuto.
+    M_tot = np.logspace(1, 4, 50)  # 10 g a 1e4 g
+    betas_sbb_full = 2e-28 * (M_tot / constants.M_pl_g) ** 1.5  # misma forma que Betas_DM
+    M_f_tot = np.full_like(M_tot, constants.M_pl_g)  # TODOS se evaporan del todo
+
+    beta_acc = fn.aplicar_corrimiento_acrecion(M_tot, M_f_tot, betas_sbb_full)
+    check(
+        "reliquia (M_f=M_pl_g) da beta_SBB(M_i), no beta_SBB(M_f)/mu",
+        np.allclose(beta_acc, betas_sbb_full, rtol=1e-12),
+        f"max |beta_acc/beta_SBB(Mi) - 1| = {np.max(np.abs(beta_acc/betas_sbb_full - 1)):.3e}",
+    )
+
+
 def test_end_evol_can_trigger():
     M = 1e10  # g
     beta0 = 1e-10
@@ -347,6 +368,7 @@ if __name__ == "__main__":
         test_horizon_tracking_is_delta_function,
         test_gamma_H_stable_fixed_point,
         test_shift_formula_continuous_at_mu_boundary,
+        test_relic_floor_does_not_use_shift_formula,
         test_end_evol_can_trigger,
         test_phase1_robust_sweep,
         test_get_betas_full_nan_safe,

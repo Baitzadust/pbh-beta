@@ -481,16 +481,39 @@ def aplicar_corrimiento_acrecion(M_tot, M_f_tot, betas_sbb_full):
     log_Mf = np.log10(M_f_tot)
     log_bf = interpolador(log_Mf)
 
-    # AUDIT.md P0-5: antes había dos fórmulas que no coincidían en la frontera mu=1.01
-    # (beta_SBB(1.01*M_i)/1.01 != beta_SBB(M_i) en general). Se usa una sola fórmula
-    # continua, beta_SBB(M_f)/mu, para todo mu; se reduce exactamente a beta_SBB(M_i)
-    # en el límite mu->1 porque M_f->M_i ahí, así que no hace falta una rama aparte.
+    # AUDIT.md P0-5 (ronda 1): antes había dos fórmulas que no coincidían en la frontera
+    # mu=1.01 (beta_SBB(1.01*M_i)/1.01 != beta_SBB(M_i) en general). Se unificó a una sola
+    # fórmula continua, beta_SBB(M_f)/mu, razonando que se reduce a beta_SBB(M_i) cuando
+    # mu->1 porque M_f->M_i ahí.
+    #
+    # BUG encontrado en la ronda 3 (Tarea 3 — el escalón en constraintsaccret.pdf, mismo
+    # patrón que P0-5): ese razonamiento es cierto en el límite mu->1, pero la fórmula
+    # unificada se rompe en el OTRO límite físico, mu->0 — que es exactamente el caso
+    # RELIQUIA (el PBH se evapora del todo, M_f queda fijo en M_pl_g). Ahí log_bf[i] casi
+    # siempre es un valor VÁLIDO (M_pl_g cae dentro del rango tabulado de M_tot), así que
+    # la rama "not isnan(log_bf[i])" entraba primero y calculaba
+    # beta_SBB(M_pl_g)/mu_diminuto -> un número arbitrario sin sentido físico, no
+    # beta_SBB(M_i). Verificado con el código en la mano: M_i=370.8 g, N_fin=30 ->
+    # M_f=M_pl_g exacto, mu=5.87e-8, beta_acc daba 7.77e-21 en vez de beta_SBB(M_i)=3.21e-17
+    # (4 órdenes de magnitud de diferencia) — ESE es el salto en M~5e2g que se ve en la
+    # figura, justo donde M_i cruza M_crit y mu pasa de "evaporación total" a "sobrevive".
+    #
+    # Fix: la condición de reliquia (PIPELINE.md, Etapa 2 — "beta_acc=beta_SBB(M_i)" para
+    # reliquias, "la abundancia depende de la densidad NUMÉRICA, que la acreción no
+    # cambia") se decide ANTES de intentar la fórmula de corrimiento, usando M_f mismo
+    # (no mu): M_f pegado al piso de Planck es la reliquia por construcción del ODE de
+    # Fase 1 (jnp.maximum(u_final,0.0) antes de exponenciar). No se suaviza: es una
+    # condición física real (el PBH se evaporó entero o no), no ruido numérico a absorber.
+    RELIC_FLOOR_TOL = 1.0 + 1e-6  # tolerancia relativa de punto flotante sobre M_pl_g
+
     for i in range(len(M_tot)):
         Mf = M_f_tot[i]
         Mi = M_tot[i]
         mu = Mf / Mi
 
-        if not np.isnan(log_bf[i]):
+        if Mf <= constants.M_pl_g * RELIC_FLOOR_TOL:
+            beta_acc[i] = betas_sbb_full[i]
+        elif not np.isnan(log_bf[i]):
             beta_acc[i] = (10.0**log_bf[i]) / mu
         elif mu <= 1.01:
             # M_f cae fuera del rango tabulado, pero mu~1 (M_f~M_i): se usa el valor
