@@ -73,61 +73,80 @@ EPS_SOFTMIN = 1.0e-2
 LIMITE_PLANCK_G = 1.5 * constants.M_pl_g
 
 # ---------------------------------------------------------------------------
-# alpha(M): evaporación de Hawking-Kerr, dependiente de la masa (Tarea 3)
+# alpha(M): evaporación de Hawking-Kerr, dependiente de la masa (Tarea 3 ronda 2,
+# corregida en Tarea 1 ronda 3)
 # ---------------------------------------------------------------------------
-# dM/dt = -alpha(M)/M^2 * factor_evap_kerr, con alpha = f(M)/(15360*pi) donde f(M) es el
-# número EFECTIVO de grados de libertad relativistas que el PBH radía a su temperatura de
-# Hawking T_H = 1/(8*pi*M) (unidades de Planck). Ver MacGibbon, PRD 44, 376 (1991) y
-# MacGibbon & Webber, PRD 41, 3052 (1990): un PBH sólo radía con multiplicidad plena las
-# especies cuya masa en reposo es menor que ~T_H; f(M) crece de ~2 (fotón+gravitón, PBHs
-# grandes y fríos) a ~106.75 (los g_* estándar del SM completo, PBHs de masa de Planck).
+# dM/dt = -alpha(M)/M^2 * factor_evap_kerr. RONDA 3 - CORRECCIÓN DE NORMALIZACIÓN:
+# en la ronda 2 se usó alpha = f(M)/(15360*pi), la normalización de UN grado de libertad
+# de Schwarzschild — pero la f(M) de MacGibbon NO es "número de dof" en ese sentido. La
+# relación correcta (Carr, Kohri, Sendouda & Yokoyama 2021 — CKSY —, Rep. Prog. Phys. 84,
+# 116902, arXiv:2002.12778, que reproduce MacGibbon PRD 44, 376 (1991)), en unidades de
+# Planck, es
 #
-# HONESTIDAD: no tengo las tablas digitalizadas de MacGibbon (1991)/MacGibbon & Webber
-# (1990) — no hay acceso a internet en esta sesión para conseguirlas. f(M) de abajo es
-# una interpolación propia, monótona y por tramos, anclada en umbrales de masa en reposo
-# de las especies del SM estándar (vía T_H(M) = 1.0574e13/M_g GeV, ver cálculo en el
-# commit) y en dos valores que SÍ están dados/validados:
-#   - f=2 para M > 1e17 g (sólo fotón+gravitón — dato del prompt de la ronda 2).
-#   - f=106.75 para M ~ M_pl (g_* estándar del SM completo, cifra habitual en cosmología,
-#     no una invención).
-# El punto intermedio en M*=5e14 g (f=24.17) se ANCLA al alpha=5.0077e-4 ya validado en
-# la ronda 1 (P0-1): ese valor se obtuvo ahí calibrando contra la edad del universo, lo
-# cual —como se pide corregir en esta Tarea 3— es circular como DEFINICIÓN de alpha (mete
-# el umbral observacional dentro del parámetro físico). Aquí se usa como punto de anclaje
-# de la interpolación de f(M) y se PRESENTA la concordancia con M*~5e14 g como
-# verificación posterior, no como la definición de alpha. Si la precisión de f(M) importa
-# para el paper, hace falta digitalizar las tablas reales de MacGibbon — esto es una
-# aproximación de orden de magnitud, físicamente motivada pero no una reproducción exacta.
+#     alpha(M) = 2.79244e-4 * f(M)
 #
-# T_H(M_g) = M_pl_GeV*M_pl_g/(8*pi*M_g) GeV. Anclas (M_g, f), masa descendente:
-#   1e22 g   f=2      T_H~1e-9 GeV, frío
-#   1e17 g   f=2      límite superior dado en el prompt
-#   5e14 g   f=24.17  ANCLA DE VALIDACIÓN (T_H~21 MeV; ronda 1, alpha=5.0077e-4)
-#   1e14 g   f=30     T_H~106 MeV, umbral del muon
-#   5e13 g   f=60     T_H~200 MeV, umbral de QCD (quarks+gluones se activan)
-#   6e12 g   f=80     T_H~1.8 GeV, umbral del tau
-#   1e11 g   f=100    T_H~106 GeV, umbral W/Z/top — casi todo el SM activo
-#   1 g      f=106.75 SM completo (g_* estándar)
-#   1e-5 g   f=106.75 se queda plano (escala de Planck, no hay más que añadir)
-_F_DOF_LOG10_M_ANCLAS = np.array([-5, 0, 11, 12.778, 13.699, 14, 14.699, 17, 22], dtype=np.float64)
-_F_DOF_ANCLAS = np.array([106.75, 106.75, 100.0, 80.0, 60.0, 30.0, 24.17, 2.0, 2.0], dtype=np.float64)
+# con f(M) en la normalización de MacGibbon. Verificado independientemente (ver commit):
+# tau = 407*(f/15.35)^-1*(M/1e10 g)^3 s con f=1.9 en M=5.1e14 g da 4.362e17 s = edad del
+# universo, sin ajustar nada; y con mi propia fórmula alpha(M)*M^3-life da 4.357e17 s
+# (0.1% de diferencia, redondeo de constantes). El alpha=5.0077e-4 de la ronda 1
+# corresponde a f=1.793 en esta normalización correcta, contra f*=1.9 — 5.6% de acuerdo:
+# mi calibración a la edad del universo (que yo mismo señalé como circular, con razón)
+# resultó ser, en los hechos, casi exacta.
+#
+# f(M): escalera reconstruida desde T_BH(M) = 1.06e13/M_g GeV y los umbrales de masa en
+# reposo del SM. Tres anclas son verbatim de CKSY (2021), las demás son mi reconstrucción
+# a partir de las contribuciones por especie que CKSY da (f_{s=0}=0.267, f_{s=1}=0.060,
+# f_{s=3/2}=0.020, f_{s=2}=0.007, f_{s=1/2}=0.147 neutro / 0.142 cargado ±e; quarks
+# u,d,s+gluones ~ 3*12*0.14+16*0.06 ≈ 6) — HONESTIDAD: no tengo la tabla completa de CKSY
+# dígito a dígito (sin acceso a internet en esta sesión), así que los tres escalones
+# intermedios (muón, QCD, W/Z+Higgs+quarks pesados) son una distribución razonable del
+# presupuesto entre las anclas firmes, no una reproducción exacta de cada paso. Las
+# anclas firmes SÍ están garantizadas por construcción (el código fuerza f(M) a pasar
+# exactamente por ellas).
+#
+#   M > 2.07e16 g                    f=1.569   ANCLA (foton+3nu+graviton, M gtrsim 1e17g)
+#   1.00e14 g < M <= 2.07e16 g       f=1.9     ANCLA (+electron; T_BH~21 MeV; incluye M*)
+#   3.85e13 g < M <= 1.00e14 g       f=2.042   +muon (0.142, mismo orden que el electron)
+#   1.18e11 g < M <= 3.85e13 g       f=8.042   +QCD: quarks u,d,s + gluones (~6, dado)
+#   1.06e10 g < M <= 1.18e11 g       f=11.696  +W/Z/Higgs (mitad del presupuesto restante)
+#   M <= 1.06e10 g                   f=15.35   ANCLA (SM completo hasta 1 TeV)
+_ALPHA_POR_F = 2.79244e-4  # CKSY (2021)/MacGibbon (1991), unidades de Planck
+
+_F_UMBRALES_M_G = np.array([1.06e10, 1.18e11, 3.85e13, 1.00e14, 2.07e16], dtype=np.float64)
+_F_PLATOS = np.array([15.35, 11.696, 8.042, 2.042, 1.9, 1.569], dtype=np.float64)
+_DELTA_LOG10 = 0.01  # ancho de la transición entre escalones (~2.3% en masa) — no un kink
+                      # verdadero (ver AUDIT.md/P1-6 en el resumen de la ronda 1: un min()
+                      # con kink real colapsó el paso del integrador ahí).
+
+_log10_umbrales = np.log10(_F_UMBRALES_M_G)
+_F_DOF_LOG10_M_ANCLAS = np.empty(2 + 2 * len(_log10_umbrales), dtype=np.float64)
+_F_DOF_ANCLAS = np.empty_like(_F_DOF_LOG10_M_ANCLAS)
+_F_DOF_LOG10_M_ANCLAS[0] = -10.0
+_F_DOF_ANCLAS[0] = _F_PLATOS[0]
+for _i, _lu in enumerate(_log10_umbrales):
+    _F_DOF_LOG10_M_ANCLAS[1 + 2 * _i] = _lu - _DELTA_LOG10
+    _F_DOF_ANCLAS[1 + 2 * _i] = _F_PLATOS[_i]
+    _F_DOF_LOG10_M_ANCLAS[2 + 2 * _i] = _lu + _DELTA_LOG10
+    _F_DOF_ANCLAS[2 + 2 * _i] = _F_PLATOS[_i + 1]
+_F_DOF_LOG10_M_ANCLAS[-1] = 25.0
+_F_DOF_ANCLAS[-1] = _F_PLATOS[-1]
 
 
 def f_dof_of_mass_g(M_g):
-    """f(M): grados de libertad relativistas efectivos a T_H(M). Ver nota de honestidad
-    y anclas arriba. Funciona con jnp (Fase 1, trazado) y con float/np (Fase 2)."""
+    """f(M) en la normalización de MacGibbon/CKSY (NO grados de libertad de Schwarzschild
+    — ver nota arriba). Funciona con jnp (Fase 1, trazado) y con float/np (Fase 2)."""
     log10_M = jnp.log10(jnp.clip(M_g, 1e-30, None))
     return jnp.interp(log10_M, _F_DOF_LOG10_M_ANCLAS, _F_DOF_ANCLAS)
 
 
 def alpha_of_mass_g(M_g):
-    """alpha(M) = f(M)/(15360*pi) (AUDIT.md ronda 1: 1 dof da 1/(15360*pi)=2.07e-5)."""
-    return f_dof_of_mass_g(M_g) / (15360.0 * jnp.pi)
+    """alpha(M) = 2.79244e-4 * f(M) (CKSY 2021 / MacGibbon 1991 — ver nota arriba)."""
+    return _ALPHA_POR_F * f_dof_of_mass_g(M_g)
 
 
-# Compatibilidad/lectura rápida: alpha en el ancla de validación M*=5e14 g (no se usa en
-# ningún cálculo — todo el código usa alpha_of_mass_g(M) evaluado en la M que corresponda).
-ALPHA_EVAP_EN_M_ESTRELLA = float(alpha_of_mass_g(jnp.asarray(5e14)))
+# Lectura rápida: alpha en M*=5.1e14 g (no se usa en ningún cálculo — todo el código usa
+# alpha_of_mass_g(M) evaluado en la M que corresponda).
+ALPHA_EVAP_EN_M_ESTRELLA = float(alpha_of_mass_g(jnp.asarray(5.1e14)))
 
 def put_M_array(Mass_min, Mass_max, num_points_low=7000, num_points_high=7000):
     Mass_cut = 1.0e5
