@@ -291,12 +291,21 @@ def end_evol(ln_rho, initial, M, beta0):
 end_evol.terminal = True
 end_evol.direction = -1
 
+# AUDIT.md P1-10: la rama omega!=1/3 de k_end_over_k/rho_f mezclaba Mpbh en GRAMOS con
+# H_end/M_pl en GeV. Mpbh_a_GeV usa la misma razón M_pl_GeV/M_pl_g ya definida arriba
+# (=5.61e23 GeV/g) para no introducir una constante nueva sin relación con el resto del
+# módulo. No muerde con omega=1/3 (celdas 8, 11 del notebook), pero Betas_*(M_tot, omega)
+# recibe omega del llamador y el caso de recalentamiento (omega=0, el punto del paper con
+# P0-4) sí entra por esta rama.
+def _Mpbh_a_GeV(Mpbh_g):
+    return Mpbh_g * (M_pl_GeV / M_pl_g)
+
 def k_end_over_k(Mpbh, omega):
     if omega == 1/3:
         res = (Mpbh / (7.1e-2 * constants.gam_rad * (1.8e15 / constants.H_end)))**(1/2)
     else:
         z   = (1 + 3*omega) / (3 * (1 + omega))
-        res = np.array((Mpbh * constants.H_end / (3 * constants.gam_rad * constants.M_pl**2))**z)
+        res = np.array((_Mpbh_a_GeV(Mpbh) * constants.H_end / (3 * constants.gam_rad * constants.M_pl**2))**z)
     return res
 
 def rho_f(Mpbh, omega):
@@ -305,7 +314,7 @@ def rho_f(Mpbh, omega):
         return constants.rho_end_inf / k_ratio**4
     else:
         z   = (1 + 3*omega) / (3 * (1 + omega))
-        res = np.array((Mpbh * constants.H_end / (3 * constants.gam_rad * constants.M_pl**2))**z)
+        res = np.array((_Mpbh_a_GeV(Mpbh) * constants.H_end / (3 * constants.gam_rad * constants.M_pl**2))**z)
         i   = (6 * (1 + omega)) / (1 + 3*omega)
         return constants.rho_end_inf / res**i
 
